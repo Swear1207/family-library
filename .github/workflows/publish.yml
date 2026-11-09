@@ -1,4 +1,4 @@
-name: Publish private library image
+name: Publish library image
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main' && github.event.repository.private == true
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -101,4 +101,4 @@ jobs:
         env:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
         run: |
-          printf 'Image published: `%s:latest`\n\nKeep the GHCR package visibility **Private**.\n' "$IMAGE_NAME" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Image published: `%s:latest`\n\nCheck package visibility before pulling from the NAS.\n' "$IMAGE_NAME" >> "$GITHUB_STEP_SUMMARY"

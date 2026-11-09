@@ -9,6 +9,9 @@ import { DOMParser } from '@xmldom/xmldom';
 
 const read = promisify(readCallback), MiB = 1024 * 1024;
 const MAX_PIXELS = 16 * 1024 * 1024, MAX_IMAGE_BYTES = 24 * MiB;
+// PDF.js decodes scan images into an original-size canvas before downsampling.
+// Allow two bounded image buffers while retaining the same per-image limit.
+const MAX_PDF_CANVAS_PIXELS = 2 * MAX_PIXELS;
 const OPF = 'http://www.idpf.org/2007/opf', CONTAINER = 'urn:oasis:names:tc:opendocument:xmlns:container';
 globalThis.DOMMatrix ||= DOMMatrix;
 globalThis.ImageData ||= ImageData;
@@ -112,13 +115,13 @@ async function pdfCover(fd, size) {
     used = 0;
     create(width,height) {
       width=Math.ceil(width);height=Math.ceil(height);dimensions(width,height);
-      if (width*height > 4*MiB || this.used+width*height > 8*MiB) throw Error('PDF canvas limit');
+      if (width*height > MAX_PIXELS || this.used+width*height > MAX_PDF_CANVAS_PIXELS) throw Error('PDF canvas limit');
       const canvas=createCanvas(width,height);this.used+=width*height;
       return {canvas,context:canvas.getContext('2d'),pixels:width*height};
     }
     reset(entry,width,height) {
       width=Math.ceil(width);height=Math.ceil(height);dimensions(width,height);
-      if(width*height>4*MiB||this.used-entry.pixels+width*height>8*MiB)throw Error('PDF canvas limit');
+      if(width*height>MAX_PIXELS||this.used-entry.pixels+width*height>MAX_PDF_CANVAS_PIXELS)throw Error('PDF canvas limit');
       this.used+=width*height-entry.pixels;entry.pixels=width*height;entry.canvas.width=width;entry.canvas.height=height;
     }
     destroy(entry) {if(entry.canvas){this.used-=entry.pixels;entry.canvas.width=1;entry.canvas.height=1;entry.canvas=null;entry.context=null;entry.pixels=0;}}

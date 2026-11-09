@@ -26,12 +26,13 @@ function pdf(){
   return Buffer.concat(chunks);
 }
 async function scannedPdf(){
-  const c=createCanvas(600,800);c.getContext('2d').fillStyle='#24b6ce';c.getContext('2d').fillRect(0,0,600,800);const image=await c.encode('jpeg',90);c.width=1;c.height=1;
+  // A common 300 dpi A4 scan must survive PDF.js's full-resolution image canvas.
+  const width=2480,height=3508,c=createCanvas(width,height);c.getContext('2d').fillStyle='#24b6ce';c.getContext('2d').fillRect(0,0,width,height);const image=await c.encode('jpeg',90);c.width=1;c.height=1;
   const content='q 600 0 0 800 0 0 cm /Cover Do Q';
   const objects=[null,Buffer.from('<< /Type /Catalog /Pages 2 0 R >>'),Buffer.from('<< /Type /Pages /Kids [3 0 R] /Count 1 >>'),
     Buffer.from('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /XObject << /Cover 5 0 R >> >> /Contents 4 0 R >>'),
     Buffer.from(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`),
-    Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width 600 /Height 800 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.length} >>\nstream\n`),image,Buffer.from('\nendstream')])];
+    Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.length} >>\nstream\n`),image,Buffer.from('\nendstream')])];
   const chunks=[Buffer.from('%PDF-1.7\n')],offsets=[0];let offset=chunks[0].length;
   for(let i=1;i<objects.length;i++){offsets.push(offset);const chunk=Buffer.concat([Buffer.from(`${i} 0 obj\n`),objects[i],Buffer.from('\nendobj\n')]);chunks.push(chunk);offset+=chunk.length;}
   chunks.push(Buffer.from(`xref\n0 ${objects.length}\n0000000000 65535 f \n`+offsets.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${offset}\n%%EOF\n`));
@@ -87,7 +88,7 @@ test('covers: authenticated on-demand PDF, EPUB and image derivatives with bound
       const image=await sample(result.path);assert.ok(image.width<=320&&image.height<=420);
     }
     const paper=await sample(pdfReady.path);assert.ok(paper.rgba[2]>180&&paper.rgba[1]<100,'first blue page, not second green page');
-    const scan=await sample((await finish('scanned.pdf')).path);assert.ok(scan.rgba[0]<100&&scan.rgba[1]>130&&scan.rgba[2]>150,'embedded JPEG page is actually decoded');
+    const scan=await sample((await finish('scanned.pdf')).path);assert.ok(scan.rgba[0]<100&&scan.rgba[1]>130&&scan.rgba[2]>150,'2480×3508 scanned JPEG produces cyan pixels rather than a blank white thumbnail');
     const book=await sample(bookReady.path);assert.ok(book.rgba[0]>180&&book.rgba[1]<100);
     const unseenFolder=path.join(dataDir,'covers',id('broken.pdf').slice(5,7),id('broken.pdf').slice(5));
     await assert.rejects(()=>stat(unseenFolder),{code:'ENOENT'});

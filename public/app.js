@@ -390,6 +390,9 @@ function renderDetail() {
   $('#detailType').textContent = (book.resourceType || '其他') + (book.year ? ' / ' + book.year : '') + ' · 资料详情';
   $('#detailMetadata').replaceChildren();
   for (const [name, value] of [['作者', book.author], ['年份', book.year], ['来源', book.source], ['分类', book.category], ['DOI', book.doi]]) appendMetadata($('#detailMetadata'), name, value);
+  const metadataState=book.file?.metadataStatus;
+  $('#detailMetadataHint').hidden=!['PDF','EPUB'].includes(book.file?.format);
+  $('#detailMetadataHint').textContent=['pending','running'].includes(metadataState)?'正在后台逐步提取作者、年份等信息，可以先阅读。已手动填写的内容会保留。':metadataState==='failed'?'此文件暂未能自动提取信息（可能加密、损坏或过于复杂），可手动补充。':'仅自动填写文件中能识别的文献信息；缺失字段和主题分类可手动补充。';
   $('#detailAbstract').textContent = book.abstract || '暂无摘要或说明，可在编辑资料时补充。';
   $('#detailAbstract').classList.toggle('is-empty', !book.abstract);
   $('#detailNotes').textContent = book.notes || '还没有笔记。读到有启发的地方，记下来与家人分享。';
@@ -438,7 +441,7 @@ async function toggleFavorite(id, button) {
   button.disabled = true; state.mutating++;
   try {
     const current = await api('document?id=' + encodeURIComponent(id));
-    await api('document', 'PUT', { book: { ...current.book, favorite: !current.book.favorite }, version: current.version });
+    await api('document', 'PUT', { book: { ...current.book, favorite: !current.book.favorite }, version: current.version, recordVersion:current.recordVersion });
     if (state.detail?.book?.id === id && $('#detailDialog').open) {
       state.detail = await api('document?id=' + encodeURIComponent(id)); renderDetail();
     }
@@ -469,7 +472,7 @@ async function openEditor(id) {
   $('#editorConflict').hidden = true; $('#conflictContent').hidden = true;
   state.conflict = null;
   try {
-    const result = id ? await api('document?id=' + encodeURIComponent(id)) : { book: emptyBook(), version: state.version };
+    const result = id ? await api('document?id=' + encodeURIComponent(id)) : { book: emptyBook(), version: state.version, recordVersion:'new' };
     state.edit = { ...result, isNew: !id };
     $('#editorTitle').textContent = id ? '编辑资料与笔记' : '新增资料';
     fillEditor(result.book);
@@ -501,7 +504,7 @@ async function saveEditor() {
   try { book = collectBook(); } catch (error) { $('#editorError').textContent = error.message; return; }
   state.saving = true; state.mutating++; $('#saveRecord').disabled = true;
   try {
-    await api('document', 'PUT', { book, version: state.edit.version });
+    await api('document', 'PUT', { book, version: state.edit.version,recordVersion:state.edit.recordVersion });
     $('#editor').close(); state.editSnapshot = formSnapshot();
     await loadResources();
     toast('资料与笔记已保存');
@@ -520,7 +523,7 @@ async function reviewConflict() {
   try {
     if (state.edit.isNew) {
       const result = await api('resources?page=1&pageSize=1');
-      state.conflict = { book: null, version: result.version };
+      state.conflict = { book: null, version: result.version,recordVersion:'new' };
       $('#conflictPreview').textContent = '资料库中有新的改动。你的新增资料尚未写入；继续保存会使用最新的资料库版本。';
       $('#useLatest').hidden = true;
     } else {
@@ -537,7 +540,7 @@ async function deleteRecord() {
   if (!state.detail?.book || !confirm('删除这条资料记录和笔记？NAS 原文件不会删除，文件仍在目录时，下次扫描会重新加入。')) return;
   $('#deleteRecord').disabled = true; state.mutating++;
   try {
-    await api('document?id=' + encodeURIComponent(state.detail.book.id), 'DELETE', { version: state.detail.version });
+    await api('document?id=' + encodeURIComponent(state.detail.book.id), 'DELETE', { version: state.detail.version,recordVersion:state.detail.recordVersion });
     $('#detailDialog').close();
     await loadResources();
     toast('资料记录已删除，原文件未改动');
@@ -563,10 +566,10 @@ async function importBackup(file) {
   if (!file) return;
   state.mutating++;
   try {
-    if (file.size > 64 * 1024 * 1024) throw new Error('备份文件超过 64 MiB，无法导入。请选择完整的资料 JSON 备份。');
+    if (file.size > 256 * 1024 * 1024) throw new Error('JSON 备份超过 256 MiB，请使用 NAS 数据卷备份恢复。');
     let data;
     try { data = JSON.parse(await file.text()); } catch { throw new Error('文件不是有效的 JSON 备份。'); }
-    if (data.version !== 1 || !Array.isArray(data.books) || data.books.length > 10000 || !data.books.every(book => book && typeof book.id === 'string' && typeof book.title === 'string')) throw new Error('备份格式不正确。请选择家庭知库或旧版一屋书导出的 JSON 文件。');
+    if (data.version !== 1 || !Array.isArray(data.books) || !data.books.every(book => book && typeof book.id === 'string' && typeof book.title === 'string')) throw new Error('备份格式不正确。请选择家庭知库或旧版一屋书导出的 JSON 文件。');
     const current = await api('books');
     if (!confirm('备份包含 ' + data.books.length + ' 条资料，将替换现有资料信息和笔记。建议先导出当前备份。确认导入？')) return;
     await api('books', 'PUT', { books: data.books, version: current.version });
@@ -595,22 +598,49 @@ async function migrateLegacy() {
 }
 async function scanFiles() {
   if (state.scanning) return;
-  state.scanning = true; state.mutating++;
+  state.scanning = true;
   const button = $('#scanBooks'); button.disabled = true; button.textContent = '正在扫描…';
   $('#scanResult').hidden = false; $('#scanResult').textContent = '正在扫描资料目录和子目录，请稍候。已有笔记和人工编辑的信息会保留。';
   try {
-    const result = await api('scan', 'POST', {});
-    const parts = ['扫描完成'];
-    if (Number.isFinite(result.found)) parts.push('发现 ' + count(result.found) + ' 个文件');
-    if (Number.isFinite(result.added)) parts.push('新增 ' + count(result.added) + ' 条资料');
-    if (Number.isFinite(result.missing) && result.missing) parts.push(count(result.missing) + ' 个原文件缺失');
-    $('#scanResult').textContent = parts.join('，') + '。题名来自文件名，可在详情中补充作者、年份、摘要与标签。';
-    await loadResources(); toast('资料目录扫描完成');
+    renderScan(await api('scan', 'POST', {background:true}));
+    toast('已开始后台收录，可以继续浏览或关闭页面');
   } catch (error) {
     $('#scanResult').textContent = '扫描未完成：' + error.message;
     if (error.status === 401) await handleError(error);
-  } finally { state.scanning = false; state.mutating--; button.disabled = false; button.textContent = '↻ 扫描资料'; }
+    state.scanning=false;button.disabled=false;button.textContent='↻ 扫描资料';
+  }
 }
+function renderScan(result) {
+  state.scanning=!!result.running;
+  const button=$('#scanBooks');button.disabled=state.scanning;button.textContent=state.scanning?'正在收录…':'↻ 扫描资料';
+  const m=result.metadata||{},processed=(m.done||0)+(m.empty||0)+(m.failed||0);
+  if(!result.started&&!m.total)return;
+  const parts=[result.started?(result.running?'正在收录':'目录扫描已结束'):'后台文献信息提取'];
+  if(result.started)parts.push('发现 '+count(result.found)+' 个文件，新增 '+count(result.added)+' 条');
+  if(result.running)parts.push('已检查 '+count(result.visited)+' 个目录条目');
+  if(result.missing)parts.push(count(result.missing)+' 个原文件缺失');
+  if(m.total)parts.push('文献信息已处理 '+count(processed)+' / '+count(m.total)+'，识别到信息 '+count(m.done||0)+' 份');
+  if(result.error)parts.push('扫描中断：'+result.error+'；已收录记录仍可使用');
+  else if(m.pending||m.running)parts.push('后台正在逐份补全，可继续浏览或关闭页面');
+  else if(m.empty||m.failed)parts.push('部分文件没有可识别信息或暂无法提取，可手动补充');
+  $('#scanResult').hidden=false;$('#scanResult').textContent=parts.join('。')+'。';
+}
+let scanPolling=false;
+async function pollScan() {
+  if(scanPolling||!state.authenticated||!state.fileLibrary||document.hidden)return;
+  scanPolling=true;
+  try {
+    const result=await api('scan');renderScan(result);
+    if(result.version!==state.version&&!state.mutating&&!state.saving&&!document.querySelector('dialog[open]'))await loadResources({quiet:true});
+    const detail=state.detail;
+    if(detail&&$('#detailDialog').open&&['pending','running'].includes(detail.book.file?.metadataStatus)){
+      const latest=await api('document?id='+encodeURIComponent(detail.book.id));
+      if(state.detail===detail&&$('#detailDialog').open){state.detail=latest;renderDetail();}
+    }
+  }catch(error){if(error.status===401)await handleError(error);}
+  finally{scanPolling=false;}
+}
+setInterval(pollScan,5000);
 
 for (const type of TYPES) { const option = node('option', '', type); option.value = type; $('#editResourceType').append(option); }
 $('#searchForm').addEventListener('submit', event => { event.preventDefault(); updateQuery({ q: $('#searchInput').value.trim(), field: $('#searchField').value }); });
@@ -656,6 +686,7 @@ $('#useLatest').addEventListener('click', () => {
 $('#overwriteLatest').addEventListener('click', () => {
   if (!state.conflict || !confirm(state.edit.isNew ? '使用最新资料库版本保存这条新增资料？' : '确认用当前表单内容覆盖刚查看的最新资料？')) return;
   state.edit.version = state.conflict.version;
+  state.edit.recordVersion = state.conflict.recordVersion;
   if (state.conflict.book) state.edit.book = { ...state.conflict.book, ...state.edit.book };
   state.conflict = null; $('#editorConflict').hidden = true; saveEditor();
 });
@@ -723,5 +754,6 @@ async function start() {
   }
   syncControls();
   await boot();
+  await pollScan();
 }
 start();

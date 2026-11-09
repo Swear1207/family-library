@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { fileType } from './file-types.mjs';
-import { serializeCatalog } from './catalog.mjs';
+import { createCatalogStore } from './catalog-store.mjs';
 
 const TEXT_LIMIT = 2 * 1024 * 1024;
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -29,7 +29,7 @@ function byteRange(header, size) {
   return { start: startValue, end: endValue === null ? size - 1 : Math.min(endValue, size - 1) };
 }
 
-export function createFileLibrary(db, booksDir) {
+export function createFileLibrary(db, booksDir, store = createCatalogStore(db)) {
   let scanning = false;
   const enabled = !!booksDir;
 
@@ -43,9 +43,9 @@ export function createFileLibrary(db, booksDir) {
   }
 
   function attach(books) {
-    const index = new Map(db.prepare('SELECT * FROM ebook_files').all().map(file => [file.id, file]));
+    const getFile=db.prepare('SELECT f.*,m.status metadata_status FROM ebook_files f LEFT JOIN metadata_jobs m ON m.id=f.id WHERE f.id=?');
     return books.map(book => {
-      const file = index.get(book.id);
+      const file = getFile.get(book.id);
       const { file: ignored, ...clean } = book;
       if (!file) return clean;
       const type = fileType(file.relative_path);
@@ -60,87 +60,93 @@ export function createFileLibrary(db, booksDir) {
           preview: type?.preview || null,
           folder: directory === '.' ? '' : directory,
           mtime: file.mtime,
+          metadataStatus: file.metadata_status||null,
         },
       };
     });
   }
 
-  async function scan(authorize = () => true) {
+  let scanState={running:false,found:0,added:0,visited:0,skipped:0,missing:0,error:null};
+  let stopped=false;
+  async function scan(authorize = () => true, {retryMetadata=false}={}) {
     if (scanning) throw fail(409, '正在扫描，请稍后再试');
     scanning = true;
+    scanState={running:true,found:0,added:0,visited:0,skipped:0,missing:0,error:null,started:Date.now()};
     try {
       const root = await rootPath();
-      const found = [];
-      let skipped = 0;
-      let visited = 0;
+      if(!db.prepare('SELECT id FROM library WHERE id=1').get())throw fail(401,'请先设置家庭账号');
+      if(retryMetadata)db.prepare("UPDATE metadata_jobs SET status='pending' WHERE status='failed'").run();
+      const scanId=randomBytes(16).toString('hex');
+      let batch=[];
+      const lookup=db.prepare('SELECT size,mtime,available FROM ebook_files WHERE id=?');
+      const exists=db.prepare('SELECT 1 FROM catalog_items WHERE id=?');
+      const upsert=db.prepare('INSERT INTO ebook_files (id,relative_path,size,mtime,available,format,scan_id) VALUES (?,?,?,?,1,?,?) ON CONFLICT(id) DO UPDATE SET relative_path=excluded.relative_path,size=excluded.size,mtime=excluded.mtime,available=1,format=excluded.format,scan_id=excluded.scan_id');
+      const queue=db.prepare("INSERT INTO metadata_jobs(id,size,mtime,status) VALUES (?,?,?,'pending') ON CONFLICT(id) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,status='pending',updated=0 WHERE metadata_jobs.size<>excluded.size OR metadata_jobs.mtime<>excluded.mtime");
+      async function flush() {
+        if(stopped)throw fail(503,'扫描已暂停，下次扫描会继续收录');
+        if(!authorize())throw fail(401,'登录已失效，请重新登录');
+        if(!batch.length)return;
+        db.exec('BEGIN IMMEDIATE');let changed=false,added=0;
+        try {
+          for(const file of batch){
+            const previous=lookup.get(file.id);
+            if(!previous||!previous.available||previous.size!==file.size||previous.mtime!==file.mtime)changed=true;
+            const extension=path.posix.extname(file.relative),format=extension.slice(1).toUpperCase();
+            upsert.run(file.id,file.relative,file.size,file.mtime,format,scanId);
+            if(!exists.get(file.id)){
+              store.put({id:file.id,title:path.posix.basename(file.relative,extension).slice(0,300)||'未命名资料',author:'',category:'其他',status:'未读',
+                location:(path.posix.dirname(file.relative)==='.'?'资料目录':path.posix.dirname(file.relative)).slice(0,300),borrower:'',notes:'',
+                created:Date.now(),color:'#456258',demo:false,resourceType:fileType(file.relative).resourceType});
+              added++;changed=true;
+              db.prepare('DELETE FROM metadata_jobs WHERE id=?').run(file.id);
+            }
+            if(['PDF','EPUB'].includes(format))queue.run(file.id,file.size,file.mtime);
+          }
+          if(changed)store.bump();db.exec('COMMIT');scanState.added+=added;
+        } catch(error){db.exec('ROLLBACK');throw error;}
+        batch=[];
+        await new Promise(resolve=>setTimeout(resolve,5));
+      }
       async function walk(directory, depth = 0) {
-        if (depth > 40) throw fail(400, '目录层级超过 40 层，请缩小资料目录范围');
-        const entries = await fs.promises.readdir(directory, { withFileTypes: true });
-        for (const entry of entries) {
-          if (++visited > 100000) throw fail(400, '目录条目超过 100000，请缩小扫描范围');
-          if (entry.name.startsWith('.') || entry.isSymbolicLink()) { skipped++; continue; }
+        if(depth>128)throw fail(400,'目录层级超过128层，已收录的资料已保存');
+        const entries=await fs.promises.opendir(directory);
+        for await (const entry of entries) {
+          if(stopped)throw fail(503,'扫描已暂停，下次扫描会继续收录');
+          scanState.visited++;
+          if (entry.name.startsWith('.') || entry.isSymbolicLink()) { scanState.skipped++; continue; }
           const full = path.join(directory, entry.name);
           const stat = await fs.promises.lstat(full);
-          if (stat.isSymbolicLink()) { skipped++; continue; }
+          if (stat.isSymbolicLink()) { scanState.skipped++; continue; }
           const resolved = await fs.promises.realpath(full);
-          if (!inside(root, resolved)) { skipped++; continue; }
+          if (!inside(root, resolved)) { scanState.skipped++; continue; }
           if (stat.isDirectory()) { await walk(full, depth + 1); continue; }
-          if (!stat.isFile() || !fileType(entry.name)) { skipped++; continue; }
-          if (found.length >= 10000) throw fail(400, '资料超过 10000 项，请缩小扫描范围');
+          if (!stat.isFile() || !fileType(entry.name)) { scanState.skipped++; continue; }
           const relative = path.relative(root, full).split(path.sep).join('/');
-          found.push({
+          batch.push({
             id: 'file-' + createHash('sha256').update(relative).digest('hex'),
             relative, size: stat.size, mtime: Math.round(stat.mtimeMs),
           });
+          scanState.found++;
+          if(batch.length>=200)await flush();
         }
       }
-      try { await walk(root); }
+      try { await walk(root);await flush(); }
       catch (error) {
         if (error.status) throw error;
-        throw fail(503, '扫描中断：有目录或文件无法读取。请检查权限后重试，原资料库未改动。');
+        throw fail(503, '扫描中断：有目录或文件无法读取。已收录的资料已保存，检查权限后可重新扫描。');
       }
       if (!authorize()) throw fail(401, '登录已失效，请重新登录');
       db.exec('BEGIN IMMEDIATE');
       try {
-        const current = db.prepare('SELECT * FROM library WHERE id=1').get();
-        if (!current) throw fail(401, '请先设置家庭账号');
-        const books = JSON.parse(current.books);
-        const existing = new Set(books.map(book => book.id));
-        let added = 0;
-        const newFiles = found.filter(file => !existing.has(file.id));
-        if (books.length + newFiles.length > 10000) throw fail(400, '资料库最多保存 10000 项，请缩小目录范围或整理资料库');
-        const previous = new Map(db.prepare('SELECT * FROM ebook_files').all().map(file => [file.id, file]));
-        const presentIds = new Set(found.map(file => file.id));
-        const changed = newFiles.length > 0 || found.some(file => {
-          const old = previous.get(file.id);
-          return !old || !old.available || old.size !== file.size || old.mtime !== file.mtime;
-        }) || [...previous.values()].some(file => file.available && !presentIds.has(file.id));
-        if (!changed) {
-          const missing = books.filter(book => previous.get(book.id)?.available === 0).length;
-          db.exec('COMMIT');
-          return { added: 0, found: found.length, missing, skipped, version: current.version };
-        }
-        db.prepare('UPDATE ebook_files SET available=0').run();
-        const upsert = db.prepare('INSERT INTO ebook_files (id,relative_path,size,mtime,available) VALUES (?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET relative_path=excluded.relative_path,size=excluded.size,mtime=excluded.mtime,available=1');
-        for (const file of found) {
-          upsert.run(file.id, file.relative, file.size, file.mtime);
-          if (existing.has(file.id)) continue;
-          const extension = path.posix.extname(file.relative);
-          books.push({
-            id: file.id, title: path.posix.basename(file.relative, extension).slice(0, 300) || '未命名资料',
-            author: '', category: '其他', status: '未读',
-            location: (path.posix.dirname(file.relative) === '.' ? '资料目录' : path.posix.dirname(file.relative)).slice(0, 300),
-            borrower: '', notes: '', created: Date.now(), color: '#456258', demo: false,
-            resourceType: fileType(file.relative).resourceType,
-          });
-          added++;
-        }
-        const missing = books.filter(book => previous.has(book.id) && !presentIds.has(book.id)).length;
-        const version = db.prepare('UPDATE library SET books=?,version=version+1 WHERE id=1 RETURNING version').get(serializeCatalog(books));
+        // Missing status is only finalized after a successful complete traversal.
+        const changed=db.prepare('UPDATE ebook_files SET available=0 WHERE scan_id<>? AND available=1').run(scanId).changes;
+        if(changed)store.bump();
+        scanState.missing=db.prepare('SELECT count(*) n FROM ebook_files f JOIN catalog_items c ON c.id=f.id WHERE f.available=0').get().n;
         db.exec('COMMIT');
-        return { added, found: found.length, missing, skipped, version: version.version };
+        return {...scanState,running:false,version:store.version()};
       } catch (error) { db.exec('ROLLBACK'); throw error; }
-    } finally { scanning = false; }
+    } catch(error){scanState.error=error.message;throw error;}
+    finally { scanning=false;scanState.running=false;scanState.finished=Date.now(); }
   }
 
   async function openIndexedFile(id, authorize) {
@@ -251,5 +257,5 @@ export function createFileLibrary(db, booksDir) {
 
   const download = (req, res, id, authorize = () => true) => serve(req, res, id, authorize, false);
   const preview = (req, res, id, authorize = () => true) => serve(req, res, id, authorize, true);
-  return { enabled, attach, scan, download, preview, text };
+  return { enabled, attach, scan, download, preview, text, status:()=>({...scanState,version:store.version()}), stop:()=>{stopped=true;}, openMetadata:id=>openIndexedFile(id,()=>!stopped) };
 }

@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - '.github/workflows/offline-image.yml'
       - '.github/workflows/publish.yml'
+      - '.github/scripts/**'
       - 'OFFLINE.md'
   workflow_dispatch:
 
@@ -90,6 +91,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -111,6 +113,17 @@ jobs:
           printf 'Image published: `%s:latest`\n\nCheck package visibility before pulling from the NAS.\n' "$IMAGE_NAME" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish Compose deployment package
+        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node .github/scripts/publish-release.mjs
+
+      - name: Export and publish verified offline image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.name }}
+          SOURCE_REVISION: ${{ github.sha }}
+          SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
+          APP_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: bash .github/scripts/export-offline-image.sh

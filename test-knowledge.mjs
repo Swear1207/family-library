@@ -109,9 +109,9 @@ test('knowledge library: upgrade, catalog, media access and shared reading',asyn
   await t.test('preserves v2 accounts and metadata and creates a recoverable upgrade snapshot',async()=>{
     await stop();const previous=new DatabaseSync(path.join(dataDir,'library.sqlite'));
     const legacy={id:'legacy-paper-book',title:'旧版实体藏书',author:'家人',category:'文学小说',status:'在读',location:'书房',borrower:'',notes:'旧版原样保留',color:'#456258',demo:false,created:1700000000000};
-    const oldBooks=JSON.parse(previous.prepare('SELECT books FROM library WHERE id=1').get().books);oldBooks.push(legacy);
+    const oldBooks=previous.prepare('SELECT data FROM catalog_items').all().map(row=>JSON.parse(row.data));oldBooks.push(legacy);
     const oldJson=JSON.stringify(oldBooks);previous.prepare('UPDATE library SET books=? WHERE id=1').run(oldJson);
-    previous.exec('DROP TABLE reading_progress; PRAGMA user_version=2;');previous.close();
+    previous.exec('DROP TABLE catalog_tags; DROP TABLE catalog_items; DROP TABLE metadata_locks; DROP TABLE metadata_jobs; DROP TABLE reading_progress; PRAGMA user_version=2;');previous.close();
     await start();const state=await request('session');assert.equal(state.json.authenticated,true);
     const saved=(await request('document?id='+pdf.id)).json;assert.equal(saved.book.notes,'保留原有的阅读笔记');assert.equal(saved.book.resourceType,'期刊论文');
     const backups=await fs.readdir(path.join(dataDir,'backups'));assert.equal(backups.length,1);

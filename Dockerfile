@@ -7,6 +7,7 @@ RUN npm ci --omit=dev --omit=optional --ignore-scripts && npm cache clean --forc
 COPY --chown=node:node server.mjs ./server.mjs
 COPY --chown=node:node ebook-files.mjs ./ebook-files.mjs
 COPY --chown=node:node catalog.mjs file-types.mjs ./
+COPY --chown=node:node catalog-store.mjs metadata-queue.mjs metadata-worker.mjs metadata-extractor.mjs ./
 COPY --chown=node:node public ./public
 USER node
 EXPOSE 8787

@@ -98,7 +98,10 @@ function remember(kind, locationValue, value, label, save = true) {
   const locationText = String(locationValue);
   if (!save || locationText.length > 2048 || !Number.isFinite(value)) return;
   const next = { id, kind, location: locationText, progress: clamp(value) };
-  if (progressKey(next) === lastSavedKey) return;
+  if (progressKey(next) === lastSavedKey && !saving) {
+    pendingProgress = null; clearTimeout(saveTimer); saveTimer = null;
+    return;
+  }
   pendingProgress = next;
   if (!saveTimer && !saving) saveTimer = setTimeout(saveProgress, Math.max(1800, 10000 - (Date.now() - lastSaveAt)));
 }
@@ -224,54 +227,175 @@ async function openPDF() {
   };
   let pdf;
   try { pdf = await task.promise; } catch (error) { if (passwordCancelled) return; if (error.status === 401) goToLogin(); throw new Error('PDF 无法打开，可能已损坏、需要密码或浏览器不兼容。可以下载原文件后阅读。'); }
-  let current = savedProgress?.kind === 'pdf' ? clamp(Number(savedProgress.location) || 1, 1, pdf.numPages) : 1;
-  let zoom = 'fit';
-  let rendering = null;
-  let generation = 0;
+  // Older versions saved just a page number; new positions add the offset within it.
+  const restored = savedProgress?.kind === 'pdf' && /^(\d+)(?::([01](?:\.\d+)?))?$/.exec(String(savedProgress.location));
+  let current = clamp(Number(restored?.[1]) || 1, 1, pdf.numPages);
+  let zoom = 'fit', epoch = 0, running = 0, frame = 0, resizeTimer;
+  let stopped = false, initializing = true, wanted = new Set();
+  const resident = new Map();
+  const firstPage = await pdf.getPage(1);
+  const firstSize = firstPage.getViewport({ scale: 1 });
   const surface = element('div', 'pdf-surface'); viewer.append(surface);
-  const controls = pageControls(() => render(current - 1), () => render(current + 1), (page) => render(page), pdf.numPages);
-  const zoomSelect = options([['fit', '适合宽度'], ['0.75', '75%'], ['1', '100%'], ['1.25', '125%'], ['1.5', '150%'], ['2', '200%'], ['3', '300%']], 'PDF 缩放', () => { zoom = zoomSelect.value; render(current, false); });
-  group(zoomSelect);
+  // Keep inexpensive page placeholders, but never retain the whole document's canvases.
+  const pages = Array.from({ length: pdf.numPages }, (_, index) => {
+    const node = element('div', 'pdf-sheet');
+    node.dataset.page = String(index + 1);
+    const placeholder = element('div', 'pdf-placeholder', '第 ' + (index + 1) + ' 页');
+    placeholder.setAttribute('aria-hidden', 'true');
+    node.append(placeholder); surface.append(node);
+    return { number: index + 1, node, placeholder, baseWidth: firstSize.width, baseHeight: firstSize.height, measured: index === 0, top: 0, width: 0, height: 0, failed: false };
+  });
+  const controls = pageControls(() => jump(current - 1), () => jump(current + 1), jump, pdf.numPages);
+  const zoomSelect = options([['fit', '适合宽度'], ['0.75', '75%'], ['1', '100%'], ['1.25', '125%'], ['1.5', '150%'], ['2', '200%'], ['3', '300%']], 'PDF 缩放', () => {
+    const anchor = position(); zoom = zoomSelect.value; relayout(anchor, true);
+  });
+  group(zoomSelect, element('span', 'toolbar-note', '向下滚动，连续阅读'));
   ready('pdf-viewer');
-  async function render(number, save = true) {
-    const myGeneration = ++generation;
-    if (rendering) { rendering.cancel(); await rendering.promise.catch(() => {}); rendering = null; }
-    if (myGeneration !== generation) return;
-    current = clamp(Math.round(number), 1, pdf.numPages);
-    controls.set(current); surface.classList.add('pdf-rendering');
+  viewer.tabIndex = 0;
+  viewer.setAttribute('aria-label', 'PDF 连续阅读区域，可上下滚动或使用页码跳转');
+  document.body.classList.add('pdf-reading');
+
+  function pageAt(top) {
+    let low = 0, high = pages.length - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (pages[middle].top <= top) low = middle; else high = middle - 1;
+    }
+    return pages[low];
+  }
+  function position() {
+    const page = pageAt(viewer.scrollTop + 1);
+    return { number: page.number, offset: clamp((viewer.scrollTop - page.top) / Math.max(1, page.height)), x: (viewer.scrollLeft + viewer.clientWidth / 2) / Math.max(1, surface.clientWidth) };
+  }
+  function fitViewer() {
+    const availableHeight = (window.visualViewport?.height || innerHeight) - viewer.getBoundingClientRect().top - $('.reader-footer').offsetHeight - 14;
+    viewer.style.height = Math.max(180, availableHeight) + 'px';
+  }
+  function relayout(anchor, invalidate = false) {
+    if (stopped) return;
+    if (invalidate) { epoch++; for (const entry of [...resident.values()]) release(entry); }
+    fitViewer();
+    const availableWidth = Math.max(80, viewer.clientWidth - 24);
+    let top = 8, width = availableWidth;
+    for (const page of pages) {
+      const scale = zoom === 'fit' ? availableWidth / page.baseWidth : Number(zoom);
+      page.top = top; page.width = page.baseWidth * scale; page.height = page.baseHeight * scale;
+      page.node.style.top = top + 'px'; page.node.style.width = page.width + 'px'; page.node.style.height = page.height + 'px';
+      top += page.height + 18; width = Math.max(width, page.width);
+      if (invalidate) page.failed = false;
+    }
+    surface.style.width = width + 24 + 'px'; surface.style.height = top - 10 + 'px';
+    const target = pages[clamp(anchor.number, 1, pages.length) - 1];
+    viewer.scrollTop = target.top + clamp(anchor.offset) * target.height;
+    viewer.scrollLeft = clamp(anchor.x ?? .5) * surface.clientWidth - viewer.clientWidth / 2;
+    update();
+  }
+  function jump(number) {
+    const page = pages[clamp(Math.round(number), 1, pages.length) - 1];
+    viewer.scrollTop = page.top;
+    update();
+  }
+  function release(entry) {
+    if (resident.get(entry.page.number) === entry) resident.delete(entry.page.number);
+    entry.released = true;
+    entry.task?.cancel();
+    if (entry.canvas) { entry.canvas.remove(); entry.canvas.width = 0; entry.canvas.height = 0; }
+    entry.page.placeholder.hidden = false;
+    entry.page.node.removeAttribute('aria-busy');
+    if (entry.done) entry.proxy?.cleanup();
+  }
+  function update() {
+    if (stopped) return;
+    const anchor = position();
+    const atEnd = viewer.scrollTop + viewer.clientHeight >= viewer.scrollHeight - 2;
+    current = atEnd ? pages.length : anchor.number;
+    if (document.activeElement !== controls.input) controls.set(current);
+    const fraction = atEnd ? 1 : (anchor.number - 1 + anchor.offset) / pages.length;
+    remember('pdf', anchor.number + ':' + anchor.offset.toFixed(4), fraction, '第 ' + current + ' / ' + pages.length + ' 页 · ' + Math.round(fraction * 100) + '%', !initializing);
+    const from = pageAt(Math.max(0, viewer.scrollTop - viewer.clientHeight * .5)).number;
+    const until = viewer.scrollTop + viewer.clientHeight * 1.5;
+    const middle = viewer.scrollTop + viewer.clientHeight / 2;
+    const candidates = [];
+    for (let number = from; number <= pages.length && pages[number - 1].top < until; number++) candidates.push(pages[number - 1]);
+    // At most six 3-megapixel canvases (~72 MB of pixel buffers), with two render jobs.
+    candidates.sort((a, b) => Math.abs(a.top + a.height / 2 - middle) - Math.abs(b.top + b.height / 2 - middle));
+    wanted = new Set(candidates.slice(0, 6).map((page) => page.number));
+    for (const entry of [...resident.values()]) if (!wanted.has(entry.page.number)) release(entry);
+    pump();
+  }
+  function schedule() { if (!frame && !stopped) frame = requestAnimationFrame(() => { frame = 0; update(); }); }
+  function pump() {
+    if (stopped) return;
+    for (const number of wanted) {
+      if (running >= 2) break;
+      const page = pages[number - 1];
+      if (resident.has(number) || page.failed) continue;
+      const entry = { page, epoch, released: false, done: false };
+      resident.set(number, entry); running++; void render(entry);
+    }
+  }
+  async function render(entry) {
+    const page = entry.page;
+    const active = () => !stopped && !entry.released && entry.epoch === epoch;
+    page.node.setAttribute('aria-busy', 'true');
     try {
-      const page = await pdf.getPage(current);
-      if (myGeneration !== generation) return;
-      const base = page.getViewport({ scale: 1 });
-      const scale = zoom === 'fit' ? Math.max(.1, (viewer.clientWidth - 18) / base.width) : Number(zoom);
-      const viewport = page.getViewport({ scale });
-      const density = Math.min(devicePixelRatio || 1, 2, Math.sqrt(8000000 / (viewport.width * viewport.height)), 8192 / Math.max(viewport.width, viewport.height));
-      const canvas = element('canvas', 'pdf-page');
-      canvas.setAttribute('aria-label', 'PDF 第 ' + current + ' 页'); canvas.setAttribute('role', 'img');
+      entry.proxy = await pdf.getPage(page.number);
+      if (!active()) return;
+      if (!page.measured) {
+        const base = entry.proxy.getViewport({ scale: 1 });
+        const anchor = position();
+        page.measured = true; page.baseWidth = base.width; page.baseHeight = base.height;
+        relayout(anchor);
+        if (!active()) return;
+      }
+      const viewport = entry.proxy.getViewport({ scale: page.width / page.baseWidth });
+      const density = Math.min(devicePixelRatio || 1, 2, Math.sqrt(3000000 / (viewport.width * viewport.height)), 8192 / Math.max(viewport.width, viewport.height));
+      const canvas = element('canvas', 'pdf-page'); entry.canvas = canvas;
+      canvas.setAttribute('aria-label', 'PDF 第 ' + page.number + ' 页'); canvas.setAttribute('role', 'img');
       canvas.width = Math.max(1, Math.floor(viewport.width * density)); canvas.height = Math.max(1, Math.floor(viewport.height * density));
       canvas.style.width = viewport.width + 'px'; canvas.style.height = viewport.height + 'px';
-      rendering = page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: [density, 0, 0, density, 0, 0] });
-      await rendering.promise;
-      if (myGeneration !== generation) return;
-      surface.replaceChildren(canvas); viewer.scrollTop = 0;
-      remember('pdf', current, current / pdf.numPages, '第 ' + current + ' / ' + pdf.numPages + ' 页', save);
+      entry.task = entry.proxy.render({ canvasContext: canvas.getContext('2d'), viewport, transform: [density, 0, 0, density, 0, 0] });
+      await entry.task.promise;
+      if (!active()) return;
+      page.node.append(canvas); page.placeholder.hidden = true;
+      page.node.setAttribute('aria-busy', 'false');
     } catch (error) {
-      if (myGeneration !== generation || error.name === 'RenderingCancelledException') return;
-      note('这一页暂时无法显示。可以切换页码重试，或下载原文件。');
-    } finally { if (myGeneration === generation) { rendering = null; surface.classList.remove('pdf-rendering'); } }
+      if (!active() || error.name === 'RenderingCancelledException') return;
+      if (error.status === 401) { goToLogin(); return; }
+      page.failed = true;
+      page.placeholder.replaceChildren(element('span', '', '第 ' + page.number + ' 页暂时无法显示'), button('重试这一页', () => {
+        release(entry); page.failed = false; page.placeholder.textContent = '第 ' + page.number + ' 页'; schedule();
+      }));
+      page.placeholder.hidden = false; page.node.setAttribute('aria-busy', 'false');
+    } finally {
+      entry.done = true; running--;
+      if (!active()) { if (entry.canvas) { entry.canvas.width = 0; entry.canvas.height = 0; } entry.proxy?.cleanup(); }
+      pump();
+    }
   }
-  await render(current, false);
+  relayout({ number: current, offset: clamp(Number(restored?.[2]) || 0), x: .5 });
+  controls.input.addEventListener('blur', () => controls.set(current));
+  viewer.addEventListener('scroll', schedule, { passive: true });
+  requestAnimationFrame(() => { initializing = false; });
   pdf.getOutline().then((items) => outline(items, async (item) => {
     let dest = item.dest;
     if (typeof dest === 'string') dest = await pdf.getDestination(dest);
     if (!Array.isArray(dest)) throw new Error('No internal destination');
     const index = typeof dest[0] === 'number' ? dest[0] : await pdf.getPageIndex(dest[0]);
-    await render(index + 1);
+    jump(index + 1);
   })).catch(() => {});
-  let resizeTimer;
-  const onResize = () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (zoom === 'fit') render(current, false); }, 200); };
+  const onResize = () => {
+    clearTimeout(resizeTimer); resizeTimer = setTimeout(() => relayout(position(), true), 160);
+  };
+  const toolbarObserver = new ResizeObserver(onResize); toolbarObserver.observe(toolbar);
   window.addEventListener('resize', onResize);
-  disposers.push(() => { clearTimeout(resizeTimer); window.removeEventListener('resize', onResize); rendering?.cancel(); });
+  window.visualViewport?.addEventListener('resize', onResize);
+  disposers.push(() => {
+    stopped = true; clearTimeout(resizeTimer); cancelAnimationFrame(frame); toolbarObserver.disconnect();
+    window.removeEventListener('resize', onResize); window.visualViewport?.removeEventListener('resize', onResize);
+    viewer.removeEventListener('scroll', schedule);
+    for (const entry of [...resident.values()]) release(entry);
+  });
 }
 
 async function openText() {

@@ -2,6 +2,10 @@
 !server.mjs
 !ebook-files.mjs
 !catalog.mjs
+!catalog-store.mjs
+!metadata-queue.mjs
+!metadata-worker.mjs
+!metadata-extractor.mjs
 !file-types.mjs
 !package.json
 !package-lock.json

@@ -361,7 +361,7 @@ test('unified files: format capabilities, safe streaming and bounded text decodi
   });
 
   await t.test('indexes every permitted extension and attaches authoritative capabilities', async () => {
-    const stored = JSON.parse(db.prepare('SELECT books FROM library WHERE id=1').get().books);
+    const stored = db.prepare('SELECT data FROM catalog_items').all().map(row=>JSON.parse(row.data));
     assert.equal(stored.length, entries.size);
     for (const extension of supportedExtensions) {
       const id = fileId(`分类/示例${extension}`);

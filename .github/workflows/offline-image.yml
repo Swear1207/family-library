@@ -58,7 +58,7 @@ jobs:
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$source_image")" = "$SOURCE_REVISION"
           docker tag "$source_image" "$sha_tag"
           docker tag "$source_image" "$latest_tag"
-          docker image inspect --format '{{.Id}}' "$sha_tag" > "$RUNNER_TEMP/offline-image-id.txt"
+          docker image inspect "$sha_tag" | jq -S '.[0] | {Architecture, Os, Config, RootFS}' > "$RUNNER_TEMP/offline-image-config.json"
           mkdir -p "$RUNNER_TEMP/offline-output"
           docker save --platform linux/amd64 "$sha_tag" "$latest_tag" | gzip -n -1 > "$RUNNER_TEMP/offline-output/$ARCHIVE_NAME"
           cd "$RUNNER_TEMP/offline-output"
@@ -72,11 +72,12 @@ jobs:
           set -euo pipefail
           sha_tag="$IMAGE_REPOSITORY:sha-$SOURCE_REVISION"
           latest_tag="$IMAGE_REPOSITORY:latest"
-          expected_id=$(cat "$RUNNER_TEMP/offline-image-id.txt")
           docker image rm "$sha_tag" "$latest_tag"
           docker load --input "$RUNNER_TEMP/offline-output/$ARCHIVE_NAME"
-          test "$(docker image inspect --format '{{.Id}}' "$sha_tag")" = "$expected_id"
-          test "$(docker image inspect --format '{{.Id}}' "$latest_tag")" = "$expected_id"
+          test "$(docker image inspect --format '{{.Id}}' "$sha_tag")" = "$(docker image inspect --format '{{.Id}}' "$latest_tag")"
+          docker image inspect "$sha_tag" | jq -S '.[0] | {Architecture, Os, Config, RootFS}' > "$RUNNER_TEMP/offline-restored-config.json"
+          cmp "$RUNNER_TEMP/offline-image-config.json" "$RUNNER_TEMP/offline-restored-config.json"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$sha_tag")" = "$SOURCE_REVISION"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$sha_tag")" = 'linux/amd64'
           container_name="offline-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           volume_name="$container_name-data"

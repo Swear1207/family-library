@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile, unlink, symlink, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, unlink, symlink, rm, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
 import { createLibraryServer } from './server.mjs';
+import { createFileLibrary } from './ebook-files.mjs';
+import { fileType, supportedExtensions } from './file-types.mjs';
 
 const projectDir = path.dirname(fileURLToPath(import.meta.url));
 const temporaryRoot = path.join(projectDir, '.test-data');
@@ -35,8 +39,8 @@ test('NAS ebook directory: authenticated scan, exact downloads and filesystem bo
     await mkdir(path.dirname(location), { recursive: true });
     await writeFile(location, fixture.bytes);
   }
-  await writeFile(path.join(booksDir, 'cover.jpg'), 'unsupported cover image');
-  await writeFile(path.join(booksDir, 'README.md'), 'unsupported markdown');
+  await writeFile(path.join(booksDir, 'program.exe'), 'unsupported executable');
+  await writeFile(path.join(booksDir, 'README.bin'), 'unsupported binary');
   const outsideBytes = Buffer.from('PRIVATE OUTSIDE CONTENT: must never be downloaded');
   const outsideFile = path.join(outsideDir, 'private.epub');
   await writeFile(outsideFile, outsideBytes);
@@ -159,8 +163,8 @@ test('NAS ebook directory: authenticated scan, exact downloads and filesystem bo
       assert.equal(book.file.available, true);
       assert.ok(!JSON.stringify(book.file).includes(booksDir), 'attachment does not disclose absolute NAS directory');
     }
-    assert.ok(!library.books.some(book => book.id === fileId('cover.jpg')));
-    assert.ok(!library.books.some(book => book.id === fileId('README.md')));
+    assert.ok(!library.books.some(book => book.id === fileId('program.exe')));
+    assert.ok(!library.books.some(book => book.id === fileId('README.bin')));
   });
 
   await t.test('downloads exact bytes and uses safe attachment filenames', async () => {
@@ -177,7 +181,7 @@ test('NAS ebook directory: authenticated scan, exact downloads and filesystem bo
       }
       assert.equal(download.headers.get('x-content-type-options'), 'nosniff');
     }
-    for (const id of ['unknown-book', manualBook.id, '../../outside/private.epub', fileId('cover.jpg')]) {
+    for (const id of ['unknown-book', manualBook.id, '../../outside/private.epub', fileId('program.exe')]) {
       await expectStatus(downloadRoute(id), {}, 404);
     }
     await expectStatus('/api/family/download', {}, 404);
@@ -278,5 +282,239 @@ test('NAS ebook directory: authenticated scan, exact downloads and filesystem bo
     assert.equal(library.books.length, fixtures.length + 1);
     assert.ok(!library.books.some(book => book.id === fileId('external-dir/private.epub')));
     await expectStatus(downloadRoute(fileId('external-dir/private.epub')), {}, 404);
+  });
+});
+
+test('unified files: format capabilities, safe streaming and bounded text decoding', async t => {
+  await mkdir(temporaryRoot, { recursive: true });
+  const runDir = await mkdtemp(path.join(temporaryRoot, 'resources-'));
+  const booksDir = path.join(runDir, 'books');
+  const outsideDir = path.join(runDir, 'outside');
+  await mkdir(booksDir, { recursive: true });
+  await mkdir(outsideDir, { recursive: true });
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE library (id INTEGER PRIMARY KEY, books TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO library VALUES (1, '[]', 0);
+    CREATE TABLE ebook_files (id TEXT PRIMARY KEY, relative_path TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL, available INTEGER NOT NULL DEFAULT 1);`);
+  const files = createFileLibrary(db, booksDir);
+  const entries = new Map();
+  async function fixture(relative, bytes) {
+    bytes = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    const filename = path.join(booksDir, ...relative.split('/'));
+    await mkdir(path.dirname(filename), { recursive: true });
+    await writeFile(filename, bytes);
+    entries.set(relative, bytes);
+    return fileId(relative);
+  }
+  for (const extension of supportedExtensions) await fixture(`分类/示例${extension}`, `fixture-${extension}-中文`);
+  await fixture('编码/UTF8.txt', '第一行\n中文与 emoji 🌱');
+  await fixture('编码/GB18030.txt', Buffer.from([0xd6, 0xd0, 0xce, 0xc4]));
+  await fixture('编码/UTF16.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('中文文本', 'utf16le')]));
+  const textLimit = 2 * 1024 * 1024;
+  await fixture('编码/large.txt', Buffer.concat([Buffer.alloc(textLimit - 1, 65), Buffer.from('中尾部')]));
+  await fixture('empty.txt', Buffer.alloc(0));
+  await fixture('linked-parent/escape.txt', 'allowed original contents');
+  await fixture('目录/active.html', '<script>document.body.textContent="unsafe"</script>');
+  await fixture('目录/active.svg', '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>');
+  await writeFile(path.join(booksDir, '.hidden.pdf'), 'hidden');
+  await writeFile(path.join(booksDir, 'program.exe'), 'executable');
+  await writeFile(path.join(outsideDir, 'escape.txt'), 'PRIVATE OUTSIDE CONTENT');
+  await files.scan();
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    const id = url.searchParams.get('id');
+    const authorize = () => req.headers['x-test-session'] === 'family';
+    try {
+      if (url.pathname === '/content') return await files.preview(req, res, id, authorize);
+      if (url.pathname === '/download') return await files.download(req, res, id, authorize);
+      if (url.pathname === '/text') {
+        const result = await files.text(id, authorize, url.searchParams.get('encoding') || 'auto');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return;
+      }
+      res.writeHead(404).end();
+    } catch (error) {
+      if (res.headersSent) { res.destroy(); return; }
+      res.writeHead(error.status || 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  async function request(action, relative, { method = 'GET', headers = {}, authenticated = true, encoding } = {}) {
+    const id = relative.startsWith('file-') ? relative : fileId(relative);
+    const query = new URLSearchParams({ id });
+    if (encoding) query.set('encoding', encoding);
+    const response = await fetch(`${base}/${action}?${query}`, {
+      method, headers: { ...(authenticated ? { 'X-Test-Session': 'family' } : {}), ...headers },
+    });
+    return { status: response.status, headers: response.headers, bytes: Buffer.from(await response.arrayBuffer()) };
+  }
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    db.close();
+    assert.equal(path.dirname(path.resolve(runDir)), path.resolve(temporaryRoot));
+    assert.ok(path.basename(runDir).startsWith('resources-'));
+    await rm(runDir, { recursive: true, force: true });
+  });
+
+  await t.test('indexes every permitted extension and attaches authoritative capabilities', async () => {
+    const stored = JSON.parse(db.prepare('SELECT books FROM library WHERE id=1').get().books);
+    assert.equal(stored.length, entries.size);
+    for (const extension of supportedExtensions) {
+      const id = fileId(`分类/示例${extension}`);
+      const original = stored.find(book => book.id === id);
+      assert.equal(original.resourceType, fileType(extension === '.pdf' ? 'file.pdf' : `file${extension}`).resourceType);
+      const attached = files.attach([{ ...original, file: { name: 'forged', folder: outsideDir, preview: 'image' } }])[0];
+      assert.equal(attached.file.name, `示例${extension}`);
+      assert.equal(attached.file.folder, '分类');
+      assert.equal(attached.file.preview, fileType(`file${extension}`).preview);
+      assert.ok(Number.isInteger(attached.file.mtime));
+      assert.equal(attached.file.size, entries.get(`分类/示例${extension}`).length);
+    }
+    assert.equal(files.attach([{ id: 'manual', title: 'paper' }])[0].resourceType, undefined);
+    const pdf = stored.find(book => book.id === fileId('分类/示例.pdf'));
+    assert.equal(files.attach([{ ...pdf, resourceType: '期刊论文' }])[0].resourceType, '期刊论文');
+    const repeated = await files.scan();
+    assert.equal(repeated.added, 0);
+    assert.equal(repeated.version, db.prepare('SELECT version FROM library WHERE id=1').get().version);
+  });
+
+  await t.test('protects GET, HEAD and text requests before returning bytes', async () => {
+    for (const action of ['content', 'download', 'text']) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = await request(action, '编码/UTF8.txt', { method, authenticated: false });
+        assert.equal(response.status, 401);
+        assert.ok(!response.bytes.includes(Buffer.from('第一行')));
+      }
+    }
+    await assert.rejects(files.text(fileId('编码/UTF8.txt'), () => false), { status: 401 });
+  });
+
+  await t.test('streams content types safely and always preserves attachment downloads', async () => {
+    for (const [relative, mime] of [
+      ['分类/示例.pdf', 'application/pdf'], ['分类/示例.epub', 'application/epub+zip'],
+      ['分类/示例.png', 'image/png'], ['分类/示例.mp3', 'audio/mpeg'], ['分类/示例.mp4', 'video/mp4'],
+      ['目录/active.html', 'text/plain; charset=utf-8'], ['目录/active.svg', 'text/plain; charset=utf-8'],
+    ]) {
+      const content = await request('content', relative);
+      assert.equal(content.status, 200);
+      assert.equal(content.headers.get('content-type'), mime);
+      assert.match(content.headers.get('content-disposition'), /^inline;/);
+      assert.equal(content.headers.get('x-content-type-options'), 'nosniff');
+      assert.deepEqual(content.bytes, entries.get(relative));
+      const download = await request('download', relative);
+      assert.match(download.headers.get('content-disposition'), /^attachment;/);
+      assert.equal(download.headers.get('content-type'), 'application/octet-stream');
+    }
+    for (const relative of ['分类/示例.docx', '分类/示例.heic', '分类/示例.tiff', '分类/示例.caj']) {
+      assert.equal((await request('content', relative)).status, 415);
+      assert.equal((await request('download', relative)).status, 200);
+    }
+  });
+
+  await t.test('honors bounded, open and suffix ranges with correct lengths', async () => {
+    const relative = '分类/示例.pdf';
+    const bytes = entries.get(relative);
+    for (const [range, start, end] of [
+      ['bytes=0-3', 0, 3], ['bytes=4-', 4, bytes.length - 1],
+      ['bytes=-4', bytes.length - 4, bytes.length - 1],
+      ['bytes=1-99999', 1, bytes.length - 1], ['bytes=-99999', 0, bytes.length - 1],
+    ]) {
+      for (const action of ['content', 'download']) {
+        const response = await request(action, relative, { headers: { Range: range } });
+        assert.equal(response.status, 206);
+        assert.equal(response.headers.get('accept-ranges'), 'bytes');
+        assert.equal(response.headers.get('content-range'), `bytes ${start}-${end}/${bytes.length}`);
+        assert.equal(Number(response.headers.get('content-length')), end - start + 1);
+        assert.deepEqual(response.bytes, bytes.subarray(start, end + 1));
+      }
+    }
+    for (const range of [`bytes=${bytes.length}-`, 'bytes=4-3', 'bytes=-0']) {
+      const response = await request('content', relative, { headers: { Range: range } });
+      assert.equal(response.status, 416);
+      assert.equal(response.headers.get('content-range'), `bytes */${bytes.length}`);
+      assert.equal(response.bytes.length, 0);
+    }
+    for (const range of ['bytes=0-1,3-4', 'items=1-2', 'bytes=not-a-range', 'bytes=9999999999999999999999-']) {
+      const response = await request('content', relative, { headers: { Range: range } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.bytes, bytes);
+    }
+    const stale = await request('content', relative, { headers: { Range: 'bytes=0-1', 'If-Range': '"old-version"' } });
+    assert.equal(stale.status, 200);
+    assert.deepEqual(stale.bytes, bytes);
+    const head = await request('content', relative, { method: 'HEAD', headers: { Range: 'bytes=0-1' } });
+    assert.equal(head.status, 200);
+    assert.equal(Number(head.headers.get('content-length')), bytes.length);
+    assert.equal(head.bytes.length, 0);
+    assert.equal((await request('content', 'empty.txt')).bytes.length, 0);
+    const emptyRange = await request('content', 'empty.txt', { headers: { Range: 'bytes=0-' } });
+    assert.equal(emptyRange.status, 416);
+    assert.equal(emptyRange.headers.get('content-range'), 'bytes */0');
+  });
+
+  await t.test('decodes UTF8, GB18030, UTF16 and truncates without breaking UTF8 characters', async () => {
+    const utf8 = await files.text(fileId('编码/UTF8.txt'));
+    assert.equal(utf8.text, '第一行\n中文与 emoji 🌱');
+    assert.equal(utf8.encoding, 'utf-8');
+    assert.equal(utf8.truncated, false);
+    const gb = await files.text(fileId('编码/GB18030.txt'));
+    assert.deepEqual(gb, { text: '中文', encoding: 'gb18030', truncated: false });
+    assert.deepEqual(await files.text(fileId('编码/UTF16.txt')), { text: '中文文本', encoding: 'utf-16le', truncated: false });
+    const large = await files.text(fileId('编码/large.txt'));
+    assert.equal(large.encoding, 'utf-8');
+    assert.equal(large.truncated, true);
+    assert.equal(large.text.length, textLimit - 1);
+    assert.ok(!large.text.includes('\ufffd'));
+    assert.deepEqual(await files.text(fileId('empty.txt')), { text: '', encoding: 'utf-8', truncated: false });
+    await assert.rejects(files.text(fileId('编码/GB18030.txt'), () => true, 'utf-8'), { status: 422 });
+    await assert.rejects(files.text(fileId('编码/UTF8.txt'), () => true, 'utf-7'), { status: 400 });
+    await assert.rejects(files.text(fileId('分类/示例.pdf')), { status: 415 });
+    assert.equal((await files.text(fileId('目录/active.html'))).text, entries.get('目录/active.html').toString());
+  });
+
+  await t.test('uses the current opened file size and refuses missing files', async () => {
+    const relative = '分类/示例.pdf';
+    const updated = Buffer.from('%PDF changed after scan; current bytes only.');
+    await writeFile(path.join(booksDir, ...relative.split('/')), updated);
+    const response = await request('content', relative, { headers: { Range: 'bytes=-5' } });
+    assert.equal(response.headers.get('content-range'), `bytes ${updated.length - 5}-${updated.length - 1}/${updated.length}`);
+    assert.deepEqual(response.bytes, updated.subarray(-5));
+    await unlink(path.join(booksDir, ...relative.split('/')));
+    assert.equal((await request('content', relative)).status, 404);
+    assert.equal((await request('download', relative)).status, 404);
+    await assert.rejects(files.text(fileId('../outside/escape.txt')), { status: 404 });
+  });
+
+  await t.test('refuses all readers when an indexed parent becomes an outside symlink', async subtest => {
+    const original = path.resolve(booksDir, 'linked-parent');
+    const saved = path.resolve(booksDir, 'saved-parent');
+    assert.equal(path.dirname(original), path.resolve(booksDir));
+    assert.equal(path.dirname(saved), path.resolve(booksDir));
+    await rename(original, saved);
+    let linked = false;
+    try {
+      try {
+        await symlink(outsideDir, original, process.platform === 'win32' ? 'junction' : 'dir');
+        linked = true;
+      } catch (error) {
+        if (['EPERM', 'EACCES', 'ENOTSUP', 'EINVAL', 'UNKNOWN'].includes(error.code)) {
+          subtest.skip(`Directory symlink is unavailable (${error.code}).`);
+          return;
+        }
+        throw error;
+      }
+      for (const action of ['content', 'download', 'text']) {
+        const response = await request(action, 'linked-parent/escape.txt');
+        assert.equal(response.status, 404);
+        assert.ok(!response.bytes.includes(Buffer.from('PRIVATE OUTSIDE CONTENT')));
+      }
+    } finally {
+      if (linked) await unlink(original);
+      await rename(saved, original);
+    }
   });
 });

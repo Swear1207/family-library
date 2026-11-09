@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash, timingSafeEqual, scrypt } from 'node:crypto';
 import { promisify } from 'node:util';
 import { createFileLibrary } from './ebook-files.mjs';
+import { validBook, cleanBook, normalizeBook, searchCatalog, serializeCatalog } from './catalog.mjs';
 
 const publicDir=fileURLToPath(new URL('./public/',import.meta.url));
 const derive=promisify(scrypt),TTL=7*86400,MAX_BYTES=5*1024*1024;
@@ -15,7 +16,6 @@ const equal=(a,b)=>typeof a==='string'&&typeof b==='string'&&Buffer.byteLength(a
 async function hashPassword(password,salt){return (await derive(password,salt,64,{N:32768,r:8,p:3,maxmem:64*1024*1024})).toString('hex')}
 const error=(status,message)=>Object.assign(new Error(message),{status});
 const passwords=p=>typeof p==='string'&&p.length>=12&&p.length<=128;
-const validBook=b=>b&&typeof b.id==='string'&&b.id.length>0&&b.id.length<=100&&typeof b.title==='string'&&b.title.trim().length>0&&b.title.length<=100&&['未读','在读','读完'].includes(b.status)&&['文学小说','儿童绘本','科普知识','生活艺术','其他'].includes(b.category)&&['author','location','borrower','notes'].every(k=>typeof b[k]==='string')&&b.author.length<=80&&b.location.length<=80&&b.borrower.length<=60&&b.notes.length<=2000&&Number.isFinite(b.created);
 
 export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0}={}){
  const appOrigin=new URL(origin).origin;
@@ -26,7 +26,12 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0}={}){
  const db=new DatabaseSync(path.join(dataDir,'library.sqlite'));
  db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;');
  const schemaVersion=db.prepare('PRAGMA user_version').get().user_version;
- if(schemaVersion>2){db.close();throw Error('Database version is newer than this application')}
+ if(schemaVersion>3){db.close();throw Error('Database version is newer than this application')}
+ if(schemaVersion>0&&schemaVersion<3){
+  const backupDir=path.join(dataDir,'backups');fs.mkdirSync(backupDir,{recursive:true,mode:0o700});
+  const backup=path.join(backupDir,`before-v3-${Date.now()}-${randomBytes(4).toString('hex')}.sqlite`);
+  db.exec(`VACUUM INTO '${backup.replace(/'/g,"''")}'`);fs.chmodSync(backup,0o600);
+ }
  if(schemaVersion===0){db.exec(`BEGIN IMMEDIATE;
  CREATE TABLE account (id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL, password_hash TEXT NOT NULL, salt TEXT NOT NULL);
  CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
@@ -36,6 +41,9 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0}={}){
  if(schemaVersion<2){db.exec(`BEGIN IMMEDIATE;
  CREATE TABLE ebook_files (id TEXT PRIMARY KEY, relative_path TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL, available INTEGER NOT NULL DEFAULT 1);
  PRAGMA user_version=2; COMMIT;`)}
+ if(schemaVersion<3){db.exec(`BEGIN IMMEDIATE;
+ CREATE TABLE reading_progress (id TEXT PRIMARY KEY, kind TEXT NOT NULL, location TEXT NOT NULL, progress REAL NOT NULL, updated INTEGER NOT NULL);
+ PRAGMA user_version=3; COMMIT;`)}
  const files=createFileLibrary(db,booksDir);
  const setupPath=path.join(dataDir,'setup-token.txt');
  const getAccount=()=>db.prepare('SELECT * FROM account WHERE id=1').get();
@@ -52,13 +60,58 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0}={}){
  let pendingHashes=0;
  async function passwordHash(p,s){if(pendingHashes>=4)throw error(429,'服务正忙，请稍后重试');pendingHashes++;try{return await hashPassword(p,s)}finally{pendingHashes--}}
  function send(res,body,status=200,cookieValue){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store, private',...(cookieValue?{'Set-Cookie':cookieValue}:{})});res.end(JSON.stringify(body))}
- async function readBody(req){if(!req.headers['content-type']?.startsWith('application/json'))throw error(415,'请使用 JSON 请求');if(Number(req.headers['content-length']||0)>MAX_BYTES)throw error(413,'请求内容不能超过 5 MB');let size=0,chunks=[];for await(const chunk of req){size+=chunk.length;if(size>MAX_BYTES)throw error(413,'请求内容不能超过 5 MB');chunks.push(chunk)}try{const d=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!d||typeof d!=='object'||Array.isArray(d))throw Error();return d}catch{throw error(400,'请求格式不正确')}}
+ async function readBody(req,limit=MAX_BYTES){if(!req.headers['content-type']?.startsWith('application/json'))throw error(415,'请使用 JSON 请求');const tooLarge=()=>error(413,`请求内容不能超过 ${limit/1024/1024} MiB`);if(Number(req.headers['content-length']||0)>limit)throw tooLarge();let size=0,chunks=[];for await(const chunk of req){size+=chunk.length;if(size>limit)throw tooLarge();chunks.push(chunk)}try{const d=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!d||typeof d!=='object'||Array.isArray(d))throw Error();return d}catch{throw error(400,'请求格式不正确')}}
  async function api(req,res,action){
-  if(!['GET','POST','PUT'].includes(req.method))throw error(405,'请求方法不支持');
-  if(req.method!=='GET'&&req.headers.origin!==appOrigin)throw error(403,'访问地址与 APP_ORIGIN 配置不一致，请从正确的网址打开');
+  if(!['GET','HEAD','POST','PUT','DELETE'].includes(req.method))throw error(405,'请求方法不支持');
+  if(!['GET','HEAD'].includes(req.method)&&req.headers.origin!==appOrigin)throw error(403,'访问地址与 APP_ORIGIN 配置不一致，请从正确的网址打开');
   if(action==='session'&&req.method==='GET'){const a=getAccount(),signedIn=!!session(req);return send(res,{configured:!!a,authenticated:signedIn,canSetup:!a,fileLibraryEnabled:files.enabled,username:signedIn?a.username:undefined})}
   if(action==='scan'&&req.method==='POST'){if(!session(req))throw error(401,'请先登录家庭账号');await readBody(req);return send(res,await files.scan(()=>!!session(req)))}
-  if(action==='download'&&req.method==='GET'){if(!session(req))throw error(401,'请先登录家庭账号');const id=new URL(req.url,'http://localhost').searchParams.get('id');return await files.download(req,res,id,()=>!!session(req))}
+  if(['download','content'].includes(action)&&['GET','HEAD'].includes(req.method)){
+   if(!session(req))throw error(401,'请先登录家庭账号');const id=new URL(req.url,'http://localhost').searchParams.get('id');
+   return await files[action==='download'?'download':'preview'](req,res,id,()=>!!session(req));
+  }
+  if(action==='text'&&req.method==='GET'){
+   if(!session(req))throw error(401,'请先登录家庭账号');const params=new URL(req.url,'http://localhost').searchParams;
+   return send(res,await files.text(params.get('id'),()=>!!session(req),params.get('encoding')||'auto'));
+  }
+  if(action==='resources'&&req.method==='GET'){
+   if(!session(req))throw error(401,'请先登录家庭账号');const row=db.prepare('SELECT * FROM library WHERE id=1').get();
+   return send(res,searchCatalog(files.attach(JSON.parse(row.books)),new URL(req.url,'http://localhost').searchParams,row.version));
+  }
+  if(action==='document'){
+   if(!session(req))throw error(401,'请先登录家庭账号');const id=new URL(req.url,'http://localhost').searchParams.get('id');
+   if(req.method==='GET'){
+    const row=db.prepare('SELECT * FROM library WHERE id=1').get(),book=JSON.parse(row.books).find(b=>b.id===id);
+    if(!book)throw error(404,'资料不存在，请刷新资料库');
+    return send(res,{book:normalizeBook(files.attach([book])[0]),version:row.version,progress:db.prepare('SELECT kind,location,progress,updated FROM reading_progress WHERE id=?').get(id)||null});
+   }
+   if(req.method==='PUT'||req.method==='DELETE'){
+    const d=await readBody(req);if(!session(req))throw error(401,'登录已失效，请重新登录');
+    if(!Number.isSafeInteger(d.version)||d.version<0)throw error(400,'资料版本不正确');
+    if(req.method==='PUT'&&!validBook(d.book))throw error(400,'资料信息格式不正确');
+    const result=transaction(()=>{
+     const row=db.prepare('SELECT * FROM library WHERE id=1').get();if(row.version!==d.version)throw error(409,'家人刚更新了资料库，请刷新后重新核对保存');
+     const books=JSON.parse(row.books),target=req.method==='PUT'?d.book.id:id,index=books.findIndex(b=>b.id===target);
+     if(req.method==='DELETE'){
+      if(index<0)throw error(404,'资料不存在');books.splice(index,1);db.prepare('DELETE FROM reading_progress WHERE id=?').run(target);
+     }else{
+      const clean=cleanBook(d.book);if(index>=0)books[index]=clean;else{if(books.length>=10000)throw error(400,'资料库最多保存 10000 条');books.push(clean)}
+     }
+     const next=db.prepare('UPDATE library SET books=?,version=version+1 WHERE id=1 RETURNING version').get(serializeCatalog(books));
+     return {ok:true,version:next.version};
+    });return send(res,result);
+   }
+  }
+  if(action==='progress'&&req.method==='POST'){
+   if(!session(req))throw error(401,'请先登录家庭账号');const d=await readBody(req);
+   if(typeof d.id!=='string'||!['pdf','epub','text','audio','video','image'].includes(d.kind)||typeof d.location!=='string'||d.location.length>2048||!Number.isFinite(d.progress)||d.progress<0||d.progress>1)throw error(400,'阅读进度格式不正确');
+   const row=db.prepare('SELECT books FROM library WHERE id=1').get(),book=JSON.parse(row.books).find(b=>b.id===d.id);
+   if(!book)throw error(404,'资料不存在');const attached=files.attach([book])[0];
+   if(!attached.file?.available||attached.file.preview!==d.kind)throw error(400,'该资料不支持此类型的阅读进度');
+   if(!session(req))throw error(401,'登录已失效，请重新登录');const updated=Date.now();
+   db.prepare('INSERT INTO reading_progress (id,kind,location,progress,updated) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,location=excluded.location,progress=excluded.progress,updated=excluded.updated').run(d.id,d.kind,d.location,d.progress,updated);
+   return send(res,{ok:true,updated});
+  }
   if(action==='setup'&&req.method==='POST'){
    limited(req);if(getAccount())throw error(409,'账号已设置，请直接登录');const d=await readBody(req);
    const expected=fs.existsSync(setupPath)?fs.readFileSync(setupPath,'utf8').trim():'';
@@ -86,21 +139,31 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0}={}){
   if(action==='books'){
    if(!session(req))throw error(401,'请先登录家庭账号');
    if(req.method==='GET'){const row=db.prepare('SELECT * FROM library WHERE id=1').get();return send(res,{books:files.attach(JSON.parse(row.books)),version:row.version})}
-   if(req.method==='PUT'){const d=await readBody(req);if(!session(req))throw error(401,'登录已失效，请重新登录');if(!Number.isSafeInteger(d.version)||!Array.isArray(d.books)||d.books.length>10000||!d.books.every(validBook)||new Set(d.books.map(b=>b.id)).size!==d.books.length)throw error(400,'图书数据格式不正确');
-    const clean=d.books.map(b=>({id:b.id,title:b.title.trim(),author:b.author,category:b.category,status:b.status,location:b.location,borrower:b.borrower,notes:b.notes,created:b.created,color:/^#[a-f0-9]{6}$/i.test(b.color)?b.color:'#456258',demo:b.demo===true}));const row=db.prepare('UPDATE library SET books=?,version=version+1 WHERE id=1 AND version=? RETURNING version').get(JSON.stringify(clean),d.version);if(!row)throw error(409,'家人刚更新了书架，请取回最新数据再保存');return send(res,{ok:true,version:row.version});
+   if(req.method==='PUT'){const d=await readBody(req,64*1024*1024);if(!session(req))throw error(401,'登录已失效，请重新登录');if(!Number.isSafeInteger(d.version)||!Array.isArray(d.books)||d.books.length>10000||!d.books.every(validBook)||new Set(d.books.map(b=>b.id)).size!==d.books.length)throw error(400,'图书数据格式不正确');
+    const current=db.prepare('SELECT books FROM library WHERE id=1').get(),old=new Map(JSON.parse(current.books).map(b=>[b.id,b]));
+    const clean=d.books.map(b=>cleanBook({...old.get(b.id),...b}));const row=db.prepare('UPDATE library SET books=?,version=version+1 WHERE id=1 AND version=? RETURNING version').get(serializeCatalog(clean),d.version);if(!row)throw error(409,'家人刚更新了书架，请取回最新数据再保存');
+    const ids=new Set(clean.map(b=>b.id));for(const p of db.prepare('SELECT id FROM reading_progress').all())if(!ids.has(p.id))db.prepare('DELETE FROM reading_progress WHERE id=?').run(p.id);
+    return send(res,{ok:true,version:row.version});
    }
   }
   throw error(404,'接口不存在');
  }
- const staticFiles=new Map([['/','library.html'],['/library.html','library.html'],['/app.js','app.js'],['/style.css','style.css'],['/icon.svg','icon.svg'],['/manifest.webmanifest','manifest.webmanifest'],['/sw.js','sw.js']]);
- const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
+ const staticFiles=new Map([['/','library.html'],['/library.html','library.html'],['/app.js','app.js'],['/style.css','style.css'],['/icon.svg','icon.svg'],['/manifest.webmanifest','manifest.webmanifest'],['/sw.js','sw.js'],['/reader.html','reader.html'],['/reader.js','reader.js'],['/reader.css','reader.css']]);
+ const vendorDir=fileURLToPath(new URL('./node_modules/',import.meta.url));
+ const vendors=new Map([['/vendor/jszip.min.js','jszip/dist/jszip.min.js'],['/vendor/epub.min.js','epubjs/dist/epub.min.js'],['/vendor/purify.min.js','dompurify/dist/purify.min.js'],['/vendor/pdfjs/pdf.mjs','pdfjs-dist/legacy/build/pdf.mjs'],['/vendor/pdfjs/pdf.worker.mjs','pdfjs-dist/legacy/build/pdf.worker.mjs'],['/vendor/pdfjs/worker.mjs','pdfjs-dist/legacy/build/pdf.worker.mjs']]);
+ const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.webmanifest':'application/manifest+json','.wasm':'application/wasm','.ttf':'font/ttf','.otf':'font/otf'};
  const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
   try{const p=new URL(req.url,'http://localhost').pathname;
+   if(p==='/reader.html'||p.startsWith('/vendor/'))res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: blob:; connect-src 'self' blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
    if(p==='/healthz'&&req.method==='GET'){db.prepare('SELECT 1').get();return send(res,{ok:true})}
    if(p.startsWith('/api/family/'))return await api(req,res,p.slice('/api/family/'.length));
    if(!['GET','HEAD'].includes(req.method))throw error(405,'请求方法不支持');
-   const name=staticFiles.get(p);if(!name)throw error(404,'页面不存在');const bytes=fs.readFileSync(path.join(publicDir,name));res.writeHead(200,{'Content-Type':mime[path.extname(name)],'Cache-Control':'no-cache','Content-Length':bytes.length});res.end(req.method==='HEAD'?undefined:bytes);
+   let filename;const name=staticFiles.get(p);
+   if(name)filename=path.join(publicDir,name);
+   else if(vendors.has(p))filename=path.join(vendorDir,vendors.get(p));
+   else {const asset=/^\/vendor\/pdfjs\/(cmaps|standard_fonts|wasm|iccs)\/([A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:bcmap|pfb|ttf|otf|wasm|js|mjs|bin|icc))$/.exec(p);if(asset)filename=path.join(vendorDir,'pdfjs-dist',asset[1],asset[2]);}
+   if(!filename||!fs.existsSync(filename))throw error(404,'页面不存在');const bytes=fs.readFileSync(filename);res.writeHead(200,{'Content-Type':mime[path.extname(filename)]||'application/octet-stream','Cache-Control':'no-cache','Content-Length':bytes.length});res.end(req.method==='HEAD'?undefined:bytes);
   }catch(e){if(!e.status)console.error('Request failed:',e.name);if(!res.headersSent)send(res,{error:e.status?e.message:'服务暂时不可用，请稍后重试'},e.status||503);else res.end()}
  });
  server.requestTimeout=15000;server.headersTimeout=10000;
@@ -112,6 +175,6 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  if(!process.env.APP_ORIGIN){console.error('请设置 APP_ORIGIN，例如 http://192.168.1.100:8787');process.exit(1)}
  const dataDir=process.env.DATA_DIR||path.resolve('./data'),port=Number(process.env.PORT||8787);
  const app=createLibraryServer({dataDir,origin:process.env.APP_ORIGIN,booksDir:process.env.BOOKS_DIR,autoScanMs:Number(process.env.SCAN_INTERVAL_SECONDS||600)*1000});
- app.server.listen(port,process.env.BIND_HOST||'0.0.0.0',()=>{console.log(`一屋书已启动：${process.env.APP_ORIGIN}`);if(fs.existsSync(path.join(dataDir,'setup-token.txt')))console.log('首次设置所需密钥保存在 /data/setup-token.txt。请在 NAS 终端运行：docker compose exec library cat /data/setup-token.txt')});
+ app.server.listen(port,process.env.BIND_HOST||'0.0.0.0',()=>{console.log(`家庭知库 · 一屋书已启动：${process.env.APP_ORIGIN}`);if(fs.existsSync(path.join(dataDir,'setup-token.txt')))console.log('首次设置所需密钥保存在 /data/setup-token.txt。请在 NAS 终端运行：docker compose exec library cat /data/setup-token.txt')});
  for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>app.close().then(()=>process.exit(0)));
 }

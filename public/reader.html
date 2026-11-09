@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#284c43">
+  <meta name="referrer" content="no-referrer">
+  <title>阅读资料 · 家庭知库</title>
+  <link rel="icon" href="/icon.svg">
+  <link rel="stylesheet" href="/reader.css">
+</head>
+<body>
+  <header class="reader-header">
+    <a class="back-link" href="/library.html" aria-label="返回资料库">← <span>资料库</span></a>
+    <div class="document-heading"><p class="eyebrow">家庭知库 · 一起阅读</p><h1 id="documentTitle">正在打开资料…</h1><p id="documentMeta" class="document-meta"></p></div>
+    <a id="download" class="download-button" hidden>↓ <span>下载原文件</span></a>
+  </header>
+  <div id="toolbar" class="reader-toolbar" role="toolbar" aria-label="阅读工具" hidden></div>
+  <main id="readerMain">
+    <p id="readerNote" class="reader-note" hidden></p>
+    <div id="loading" class="loading" role="status"><span class="loading-mark" aria-hidden="true"></span><p id="loadingText">正在连接家里的资料库…</p></div>
+    <section id="errorPanel" class="error-panel" role="alert" hidden><span class="error-icon" aria-hidden="true">▤</span><h2 id="errorTitle">暂时无法预览</h2><p id="errorMessage"></p><div class="error-actions"><button id="retryButton" type="button">重新加载</button><a id="fallbackDownload" class="download-button" hidden>下载原文件</a><a href="/library.html">返回资料库</a></div></section>
+    <section id="viewer" class="viewer" aria-label="资料内容" hidden></section>
+  </main>
+  <footer class="reader-footer"><span id="positionLabel">阅读进度由全家共用</span><span id="saveStatus" role="status" aria-live="polite"></span></footer>
+  <dialog id="outlineDialog" class="outline-dialog"><div class="dialog-heading"><h2>目录</h2><button id="closeOutline" type="button" aria-label="关闭目录">×</button></div><nav id="outlineList" aria-label="资料目录"></nav></dialog>
+  <dialog id="passwordDialog" class="password-dialog"><form id="passwordForm"><h2>这份 PDF 需要密码</h2><p id="passwordHint">输入文件密码后，在当前浏览器中解锁。</p><label>文件密码<input id="filePassword" type="password" autocomplete="off" required></label><div class="error-actions"><button id="cancelPassword" type="button">取消</button><button class="download-button" type="submit">打开 PDF</button></div></form></dialog>
+  <script type="module" src="/reader.js"></script>
+</body>
+</html>

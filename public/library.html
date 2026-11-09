@@ -1,8 +1,172 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#284c43"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="description" content="把喜欢的书，安放在家里。管理藏书、阅读与借阅的家庭小书架。"><link rel="manifest" href="manifest.webmanifest"><link rel="icon" href="icon.svg"><title>一屋书 · 家庭图书馆</title><link rel="stylesheet" href="style.css"></head>
-<body><section id="loginScreen" class="login-screen"><div class="login-card"><span class="logo">冊</span><p class="eyebrow">ONE ACCOUNT · ONE FAMILY</p><h1>欢迎回到一屋书</h1><p id="loginHint">正在连接家庭书架…</p><form id="loginForm" hidden><label id="setupTokenLabel" hidden>初始化密钥<input name="setupToken" type="password" autocomplete="off" maxlength="64" placeholder="仅首次设置需要"></label><label>家庭账号<input name="username" autocomplete="username" required pattern="[a-zA-Z0-9_\-]{3,32}" maxlength="32" value="family"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="128"></label><label id="confirmLabel" hidden>确认密码<input name="confirmPassword" type="password" autocomplete="new-password" maxlength="128"></label><button class="primary" id="loginSubmit">登录共享书架</button></form><p id="loginError" role="alert"></p><p id="ownerLogin" hidden></p><p class="login-foot">全家一个账号 · 藏书NAS同步</p></div></section><div id="appShell" hidden><header><a class="brand" href="./"><span class="logo">冊</span><span>一屋书<small>FAMILY LIBRARY</small></span></a><div class="account-actions"><span id="syncStatus">家庭共享书架</span><button id="refresh" class="text">刷新</button><button id="passwordButton" class="text">修改密码</button><button id="logout" class="text">退出</button></div><button id="add" class="primary">＋ 添加图书</button></header>
-<main><section class="hero"><div><p class="eyebrow">OUR LITTLE LIBRARY / 家里的阅读角</p><h1>一屋书，<br>一家的好时光。</h1><p class="intro">把每一本珍藏、每一次阅读，<br class="mobile">都好好记下来。</p></div><div class="still-life" aria-hidden="true"><div class="sun"></div><div class="vase"></div><div class="book b1">阅读的日常</div><div class="book b2">THE LITTLE PRINCE</div><div class="book b3">山 海 之 间</div><div class="shelf"></div><span>A HOME FOR EVERY STORY.</span></div></section>
-<section class="stats" aria-label="藏书统计"><div><span>家中藏书</span><strong id="total">0</strong><small>本故事，等待翻开</small></div><div><span>正在阅读</span><strong id="reading">0</strong><small>慢慢读，不着急</small></div><div><span>已经读完</span><strong id="done">0</strong><small>留下属于你的感想</small></div><div><span>借出图书</span><strong id="lent">0</strong><small>好书也值得分享</small></div></section>
-<section class="library"><div class="section-title"><div><p class="eyebrow">THE BOOKSHELF</p><h2>我们的书架 <span id="count"></span></h2></div><div class="shelf-actions"><button id="scanBooks" class="quiet" hidden>↻ 扫描电子书</button><button id="export" class="quiet">↓ 导出备份</button></div></div><p id="scanResult" class="scan-result" role="status" hidden></p><div class="toolbar"><label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索书名、作者、位置或借阅人" aria-label="搜索图书"></label><select id="category" aria-label="按分类筛选"><option value="">全部分类</option><option>文学小说</option><option>儿童绘本</option><option>科普知识</option><option>生活艺术</option><option>其他</option></select><select id="sort" aria-label="排序"><option value="new">最近添加</option><option value="title">按书名</option></select></div><nav class="tabs" aria-label="阅读状态"><button data-filter="all" class="active">全部图书</button><button data-filter="未读">想读</button><button data-filter="在读">在读</button><button data-filter="读完">读完</button><button data-filter="lent">已借出</button></nav><div id="grid" class="grid"></div><div id="empty" class="empty" hidden><span>⌕</span><h3>这里还没有图书</h3><p>试试其他关键词，或添加第一本藏书。</p></div></section>
-<footer><div><b>一屋书</b><p>一本一本，收藏家的温度。</p></div><div><p>家庭共享版 · 图书保存在NAS，全家共用同一份书架。</p><p>联网后自动同步，也可以导出一份备份。<button id="import" class="text">导入备份</button> · <button id="help" class="text">添加到手机桌面</button></p><button id="migrate" class="text" hidden>导入这台设备的旧书架</button> · <button id="clearDemo" class="text">移除示例图书</button></div></footer></main>
-<dialog id="editor"><form id="form"><div class="modal-head"><div><p class="eyebrow">YOUR COLLECTION</p><h2 id="dialogTitle">添加一本好书</h2></div><button type="button" id="close" class="icon" aria-label="关闭">×</button></div><input name="id" type="hidden"><section id="fileDetails" class="file-details" hidden><p id="fileDescription"></p><a id="detailDownload" class="download-link">↓ 下载电子书</a><small>书籍目录只读。删除本条记录不会删除 NAS 原文件。</small></section><label>书名 <em>*</em><input name="title" required maxlength="100" placeholder="例如：小王子"></label><div class="fields"><label>作者<input name="author" maxlength="80" placeholder="作者姓名"></label><label>分类<select name="category"><option>文学小说</option><option>儿童绘本</option><option>科普知识</option><option>生活艺术</option><option>其他</option></select></label></div><div class="fields"><label>收纳位置<input name="location" maxlength="80" placeholder="例如：客厅书架第二层"></label><label>阅读状态<select name="status"><option>未读</option><option>在读</option><option>读完</option></select></label></div><label>借阅人 <small>留空表示在家；清空并保存即可归还</small><input name="borrower" maxlength="60" placeholder="借给了谁？"></label><label>阅读笔记<textarea name="notes" maxlength="2000" rows="3" placeholder="摘录一句喜欢的话，或写下读后感…"></textarea></label><div class="modal-actions"><button type="button" id="delete" class="danger">删除图书</button><button type="submit" class="primary">保存图书</button></div></form></dialog><dialog id="info"><div class="modal-head"><h2>装进你的手机</h2><button id="infoClose" class="icon" aria-label="关闭">×</button></div><p>在 iPhone 的 Safari 中打开网站，点击“分享”，选择“添加到主屏幕”。</p><p>添加后使用相同家庭账号登录，就能看到NAS书架。图书需要联网读取和保存，修改密码会让其他设备重新登录。</p></dialog><dialog id="passwordDialog"><form id="passwordForm"><div class="modal-head"><h2>修改家庭密码</h2><button type="button" id="passwordClose" class="icon" aria-label="关闭修改密码">×</button></div><p>修改后，其他家人需要使用新密码重新登录。</p><label>原密码<input name="currentPassword" type="password" autocomplete="current-password" required maxlength="128"></label><label>新密码<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label><label>确认新密码<input name="confirmPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label><p id="passwordError" role="alert"></p><button class="primary">保存新密码</button></form></dialog></div><input id="file" type="file" accept="application/json,.json" hidden><div id="toast" role="status"></div><script src="app.js"></script></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#153748">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="description" content="家庭共用的资料与文献库。在 NAS 上整理、检索、阅读与收藏。">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg">
+  <title>家庭知库 · 一屋书</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#searchInput">跳到资料检索</a>
+  <section id="loginScreen" class="login-screen" aria-labelledby="loginTitle">
+    <div class="login-intro">
+      <a class="brand" href="./"><img src="icon.svg" alt="" width="44" height="44"><span>家庭知库<small>一屋书 · FAMILY KNOWLEDGE</small></span></a>
+      <div class="login-story">
+        <p class="eyebrow">A PLACE FOR WHAT YOU KNOW</p>
+        <h1>好资料，<br>值得一起收藏。</h1>
+        <p>把书籍、文献、数据与影音，<br>放进全家共享的知识库。</p>
+        <div class="login-topics" aria-label="可整理的资料"><span>书籍与文献</span><span>文档与数据</span><span>图片与影音</span></div>
+      </div>
+      <p class="login-storage">资料存放在你的 NAS · 一个账号，全家共用</p>
+    </div>
+    <div class="login-card">
+      <p class="eyebrow">YOUR FAMILY COLLECTION</p>
+      <h2 id="loginTitle">欢迎回来</h2>
+      <p id="loginHint" class="muted">正在连接家庭资料库…</p>
+      <form id="loginForm" hidden>
+        <label id="setupTokenLabel" hidden>初始化密钥<input name="setupToken" type="password" autocomplete="off" maxlength="64" placeholder="仅首次设置需要"></label>
+        <label>家庭账号<input name="username" autocomplete="username" required pattern="[a-zA-Z0-9_\-]{3,32}" maxlength="32" placeholder="例如 family"></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="128" placeholder="输入家庭共享密码"></label>
+        <label id="confirmLabel" hidden>确认密码<input name="confirmPassword" type="password" autocomplete="new-password" maxlength="128" placeholder="再次输入密码"></label>
+        <p id="loginError" class="form-error" role="alert"></p>
+        <button class="button primary login-submit" id="loginSubmit" type="submit">登录家庭知库 <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="login-foot">每位家人使用同一个账号，看到同一份收藏和笔记。</p>
+    </div>
+  </section>
+  <div id="appShell" hidden>
+    <header class="site-header">
+      <a class="brand" href="./"><img src="icon.svg" alt="" width="40" height="40"><span>家庭知库<small>一屋书 · FAMILY KNOWLEDGE</small></span></a>
+      <div class="header-location"><span class="status-dot" aria-hidden="true"></span><span>家庭共享资料库</span></div>
+      <div class="header-actions">
+        <button id="scanBooks" class="button secondary" hidden><span aria-hidden="true">↻</span> 扫描资料</button>
+        <button id="add" class="button primary"><span aria-hidden="true">＋</span> 新增资料</button>
+        <details class="account-menu" id="accountMenu">
+          <summary class="account-trigger" aria-label="账号与管理"><span class="avatar" aria-hidden="true">家</span><span class="account-label">管理</span><span aria-hidden="true">⌄</span></summary>
+          <div class="account-popover">
+            <p class="menu-caption" id="accountName">家庭共享账号</p>
+            <button id="refresh" type="button">刷新资料</button>
+            <button id="export" type="button">导出资料备份</button>
+            <button id="import" type="button">导入资料备份</button>
+            <button id="migrate" type="button" hidden>导入本机旧书架</button>
+            <button id="clearDemo" type="button" hidden>移除旧版示例资料</button>
+            <div class="menu-divider"></div>
+            <button id="help" type="button">添加到手机桌面</button>
+            <button id="passwordButton" type="button">修改家庭密码</button>
+            <button id="logout" type="button" class="danger-text">退出登录</button>
+          </div>
+        </details>
+      </div>
+    </header>
+    <main class="workspace">
+      <section class="search-home" aria-labelledby="collectionTitle">
+        <div class="collection-heading">
+          <div><p class="eyebrow">YOUR COLLECTION, CONNECTED</p><h1 id="collectionTitle">全家的知识，都在这里。</h1><p class="search-description">从一本书，到一份资料。检索、阅读，再留下自己的思考。</p></div>
+          <div class="collection-mark" aria-hidden="true"><span>藏</span><small>KNOWLEDGE<br>AT HOME</small></div>
+        </div>
+        <form id="searchForm" class="search-form" role="search">
+          <label class="search-field-label"><span class="sr-only">检索字段</span><select id="searchField" aria-label="检索字段"><option value="all">全部信息</option><option value="title">题名</option><option value="author">作者</option><option value="doi">DOI</option></select></label>
+          <div class="search-input-wrap"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg><label for="searchInput" class="sr-only">资料信息检索</label><input id="searchInput" type="search" placeholder="检索题名、作者、摘要、标签或 DOI" autocomplete="off" maxlength="500"></div>
+          <button class="button primary search-submit" type="submit">检索<span aria-hidden="true"> →</span></button>
+        </form>
+        <div class="search-foot"><span>资料信息检索<span class="foot-separator">·</span>按已收录的信息查找</span><span id="syncStatus" role="status">正在连接…</span></div>
+      </section>
+      <section class="stats" aria-label="资料库统计">
+        <div><span>全部资料</span><strong id="total">—</strong></div>
+        <div><span>本地文件</span><strong id="filesCount">—</strong></div>
+        <div><span>正在阅读</span><strong id="reading">—</strong></div>
+        <div><span>已经读完</span><strong id="done">—</strong></div>
+        <button id="favoritesShortcut" type="button" aria-pressed="false"><span>已收藏 <span aria-hidden="true">☆</span></span><strong id="favoritesCount">—</strong></button>
+      </section>
+      <p id="scanResult" class="notice scan-result" role="status" hidden></p>
+      <div class="collection-layout">
+        <div id="desktopFilters" class="desktop-filters">
+          <aside id="filters" class="filters" aria-label="筛选资料">
+            <div class="filter-heading"><h2>筛选资料</h2><button id="resetFilters" class="text-button" type="button">重置</button></div>
+            <section class="filter-group"><h3>资料类型</h3><div id="typeFacets" class="type-facets"></div></section>
+            <section class="filter-group filter-fields">
+              <label>年份范围<span class="year-range"><input id="yearFrom" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="起始年份" aria-label="起始年份"><span aria-hidden="true">—</span><input id="yearTo" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="结束年份" aria-label="结束年份"></span></label>
+              <p id="yearError" class="form-error" role="alert" hidden></p>
+              <label>主题分类<select id="categoryFilter"><option value="">全部分类</option></select></label>
+              <label>标签<select id="tagFilter"><option value="">全部标签</option></select></label>
+              <label>文件格式<select id="formatFilter"><option value="">全部格式</option></select></label>
+              <label>阅读状态<select id="statusFilter"><option value="">全部状态</option><option>未读</option><option>在读</option><option>读完</option><option value="lent">已借出</option></select></label>
+              <label>文件状态<select id="availabilityFilter"><option value="">全部资料</option><option value="available">文件可用</option><option value="missing">文件缺失</option></select></label>
+              <label class="checkbox-label"><input id="favoriteFilter" type="checkbox"><span>只看已收藏</span></label>
+            </section>
+            <p class="filter-note">分类与标签可以在资料详情中编辑。</p>
+          </aside>
+        </div>
+        <section class="results-panel" aria-labelledby="resultsHeading">
+          <div class="results-toolbar">
+            <div><p class="eyebrow">EXPLORE THE COLLECTION</p><h2 id="resultsHeading">全部资料 <span id="resultCount" class="count-badge">—</span></h2></div>
+            <div class="results-controls">
+              <button id="openFilters" class="button secondary mobile-filter-button" type="button">筛选 <span id="activeFilterCount" hidden></span></button>
+              <label class="sort-label"><span class="sr-only">排序方式</span><select id="sort" aria-label="排序方式"><option value="new">最近加入</option><option value="year">年份新到旧</option><option value="title">题名 A—Z</option></select></label>
+              <div class="view-switch" role="group" aria-label="结果密度"><button id="listView" type="button" class="active" aria-pressed="true" aria-label="标准列表"><svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14M3 8h9M3 13h14M3 17h9"></path></svg></button><button id="compactView" type="button" aria-pressed="false" aria-label="紧凑列表"><svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14M3 8h14M3 12h14M3 16h14"></path></svg></button></div>
+            </div>
+          </div>
+          <div id="activeFilters" class="active-filters" aria-label="已应用筛选"></div>
+          <div id="loadError" class="notice error-notice" role="alert" hidden><span id="loadErrorMessage"></span><button id="retryLoad" class="text-button" type="button">重试</button></div>
+          <div id="results" class="results" aria-live="polite" aria-busy="false"></div>
+          <div id="empty" class="empty" hidden><div class="empty-symbol" aria-hidden="true">⌕</div><h3 id="emptyTitle">还没有收录资料</h3><p id="emptyDescription">扫描 NAS 上的资料目录，或手动添加第一条记录。</p><button id="emptyAction" class="button secondary" type="button">新增资料</button></div>
+          <div id="loading" class="loading-status" role="status" hidden><span class="spinner" aria-hidden="true"></span>正在检索资料…</div>
+          <nav id="pagination" class="pagination" aria-label="结果分页" hidden><span id="pageSummary"></span><div class="page-controls"><button id="previousPage" type="button" class="button secondary">← 上一页</button><span id="pagePosition"></span><button id="nextPage" type="button" class="button secondary">下一页 →</button></div></nav>
+        </section>
+      </div>
+      <footer class="site-footer"><span><b>家庭知库</b><span class="footer-divider">/</span>一屋书，收藏全家的知识。</span><span>资料存储在 NAS · 共享账号 · 原文件只读</span></footer>
+    </main>
+  </div>
+  <dialog id="filterDialog" class="filter-dialog"><div class="modal-head"><div><p class="eyebrow">REFINE YOUR SEARCH</p><h2>查找想要的资料</h2></div><button id="closeFilters" type="button" class="icon-button" aria-label="关闭筛选">×</button></div><div id="mobileFilters"></div><div class="filter-dialog-footer"><button id="applyFilters" type="button" class="button primary">查看检索结果</button></div></dialog>
+  <dialog id="detailDialog" class="detail-dialog" aria-labelledby="detailTitle">
+    <div class="modal-head detail-head"><div><p id="detailType" class="eyebrow">RESOURCE DETAILS</p><h2 id="detailTitle">正在读取资料…</h2></div><button id="closeDetail" type="button" class="icon-button" aria-label="关闭资料详情">×</button></div>
+    <p id="detailError" class="form-error" role="alert" hidden></p>
+    <div id="detailContent" hidden>
+      <div class="detail-primary-actions"><div id="detailFileActions" class="file-actions"></div><button id="detailFavorite" class="button secondary" type="button">☆ 收藏</button></div>
+      <dl id="detailMetadata" class="metadata-grid"></dl>
+      <section class="detail-section"><h3>摘要与说明</h3><p id="detailAbstract" class="long-text"></p></section>
+      <div id="detailTags" class="detail-tags"></div>
+      <section id="detailFileSection" class="detail-section file-section" hidden><h3>本地文件</h3><p id="detailFileName"></p><p id="detailFileMeta" class="muted"></p><p id="detailFileState" class="muted"></p></section>
+      <section class="detail-section"><div class="section-heading"><h3>家庭阅读与笔记</h3><span id="detailStatus" class="reading-badge"></span></div><p id="detailNotes" class="long-text"></p><dl id="detailHousehold" class="metadata-grid household-metadata"></dl></section>
+      <div class="modal-actions"><button id="deleteRecord" type="button" class="text-button danger-text">删除记录</button><button id="detailEdit" type="button" class="button primary">编辑资料与笔记</button></div>
+    </div>
+  </dialog>
+  <dialog id="editor" class="editor-dialog" aria-labelledby="editorTitle">
+    <form id="editForm">
+      <div class="modal-head"><div><p class="eyebrow">MAKE IT YOUR OWN</p><h2 id="editorTitle">新增资料</h2></div><button id="closeEditor" type="button" class="icon-button" aria-label="关闭编辑">×</button></div>
+      <p id="editorFileHint" class="notice" hidden></p>
+      <section class="edit-section"><h3>基本信息</h3>
+        <label>题名 <span class="required">*</span><input name="title" required maxlength="300" placeholder="输入书名、文献题名或资料名称"></label>
+        <div class="field-grid"><label>资料类型<select name="resourceType" id="editResourceType"></select></label><label>作者 / 创作者<input name="author" maxlength="200" placeholder="多位作者可用分号分隔"></label></div>
+        <div class="field-grid"><label>年份<input name="year" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="例如 2025"></label><label>主题分类<input name="category" maxlength="80" list="categorySuggestions" placeholder="例如 自然科学、家庭生活"></label></div>
+        <label>来源<input name="source" maxlength="160" placeholder="期刊、出版社、机构或资料来源"></label>
+        <label>DOI<input name="doi" maxlength="200" placeholder="如有，请填写 DOI" spellcheck="false"></label>
+      </section>
+      <section class="edit-section"><h3>摘要与整理</h3>
+        <label>摘要 / 资料说明<textarea name="abstract" maxlength="8000" rows="4" placeholder="这份资料讲了什么？也可以记录数据内容或使用说明。"></textarea></label>
+        <label>标签 <small>用逗号分隔，每个最多 40 字，最多 30 个</small><input name="tags" maxlength="1250" placeholder="例如 人工智能，学习资料，待整理"></label>
+        <label class="checkbox-label"><input name="favorite" type="checkbox"><span>加入家庭收藏</span></label>
+      </section>
+      <section class="edit-section"><h3>家庭阅读</h3>
+        <div class="field-grid"><label>阅读状态<select name="status"><option>未读</option><option>在读</option><option>读完</option></select></label><label>借阅人<input name="borrower" maxlength="80" placeholder="实体资料借给了谁？"></label></div>
+        <label>收纳位置<input name="location" maxlength="300" placeholder="书架位置或资料存放说明"></label>
+        <label>笔记<textarea name="notes" maxlength="20000" rows="5" placeholder="记录摘录、思考或家人的阅读心得…"></textarea></label>
+      </section>
+      <div id="editorConflict" class="notice conflict-notice" hidden><p>这份资料已被家人更新。你的输入仍保留在表单中；可以先对照最新内容，再决定如何处理。</p><button id="reviewConflict" type="button" class="text-button">查看最新内容</button><div id="conflictContent" hidden><pre id="conflictPreview"></pre><div class="conflict-actions"><button id="useLatest" type="button" class="button secondary">载入最新内容</button><button id="overwriteLatest" type="button" class="button secondary">使用当前表单保存</button></div></div></div>
+      <p id="editorError" class="form-error" role="alert"></p>
+      <div class="modal-actions"><button id="cancelEditor" type="button" class="button secondary">取消</button><button id="saveRecord" type="submit" class="button primary">保存资料</button></div>
+    </form>
+  </dialog>
+  <datalist id="categorySuggestions"></datalist>
+  <dialog id="passwordDialog" aria-labelledby="passwordTitle"><form id="passwordForm"><div class="modal-head"><div><p class="eyebrow">FAMILY ACCOUNT</p><h2 id="passwordTitle">修改家庭密码</h2></div><button id="passwordClose" type="button" class="icon-button" aria-label="关闭密码设置">×</button></div><p class="muted">修改后，其他家人需要使用新密码重新登录。</p><label>原密码<input name="currentPassword" type="password" autocomplete="current-password" required maxlength="128"></label><label>新密码<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128" placeholder="至少 12 位"></label><label>确认新密码<input name="confirmPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label><p id="passwordError" class="form-error" role="alert"></p><button class="button primary full-width" type="submit">保存新密码</button></form></dialog>
+  <dialog id="infoDialog" aria-labelledby="infoTitle"><div class="modal-head"><div><p class="eyebrow">KNOWLEDGE, WITH YOU</p><h2 id="infoTitle">把知库放进手机</h2></div><button id="infoClose" type="button" class="icon-button" aria-label="关闭使用说明">×</button></div><ol class="help-steps"><li>在 iPhone 的 Safari 中打开家庭知库。</li><li>点击“分享”，选择“添加到主屏幕”。</li><li>使用家庭账号登录，随时检索和阅读资料。</li></ol><p class="notice">访问时需要连接家庭 NAS 所在网络，或通过你配置的远程连接访问。资料与笔记在 NAS 保存，当前不提供离线同步。</p><p class="muted">下载后可以用手机上的相应应用打开。文件移动后请重新扫描；删除资料记录不会删除 NAS 原文件。</p></dialog>
+  <input id="importFile" type="file" accept="application/json,.json" hidden>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

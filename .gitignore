@@ -9,4 +9,7 @@ backups/
 *.db
 setup-token.txt
 node_modules/
+.npm-cache/
+.browser-test/
+release-output/
 *.bak

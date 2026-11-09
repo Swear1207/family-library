@@ -1,0 +1,118 @@
+name: Export offline image for NAS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/offline-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: family-library-offline-amd64
+  cancel-in-progress: false
+
+jobs:
+  export:
+    if: github.repository == 'Swear1207/family-library' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: read
+    env:
+      IMAGE_REPOSITORY: ghcr.io/swear1207/family-library
+      SOURCE_REVISION: ccc2ee08490db71a74a1aa5259af7c71757eadca
+      SOURCE_DIGEST: sha256:96c97513e02e0dbab40e54826d1d58588c0bc4bc94a49e085f24b62711331dcc
+      RELEASE_TAG: v2.0.0-ccc2ee0
+      ARCHIVE_NAME: family-library-2.0.0-linux-amd64.tar.gz
+
+    steps:
+      - name: Confirm the existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_target=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.target_commitish')
+          test "$release_target" = "$SOURCE_REVISION"
+
+      - name: Log in to read the existing image
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Export the pinned amd64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_image="$IMAGE_REPOSITORY@$SOURCE_DIGEST"
+          sha_tag="$IMAGE_REPOSITORY:sha-$SOURCE_REVISION"
+          latest_tag="$IMAGE_REPOSITORY:latest"
+          docker pull --platform linux/amd64 "$source_image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$source_image")" = 'linux/amd64'
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$source_image")" = "$SOURCE_REVISION"
+          docker tag "$source_image" "$sha_tag"
+          docker tag "$source_image" "$latest_tag"
+          docker image inspect --format '{{.Id}}' "$sha_tag" > "$RUNNER_TEMP/offline-image-id.txt"
+          mkdir -p "$RUNNER_TEMP/offline-output"
+          docker save --platform linux/amd64 "$sha_tag" "$latest_tag" | gzip -n -1 > "$RUNNER_TEMP/offline-output/$ARCHIVE_NAME"
+          cd "$RUNNER_TEMP/offline-output"
+          gzip --test "$ARCHIVE_NAME"
+          sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+          sha256sum --check "$ARCHIVE_NAME.sha256"
+
+      - name: Load the archive and check the restored container
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha_tag="$IMAGE_REPOSITORY:sha-$SOURCE_REVISION"
+          latest_tag="$IMAGE_REPOSITORY:latest"
+          expected_id=$(cat "$RUNNER_TEMP/offline-image-id.txt")
+          docker image rm "$sha_tag" "$latest_tag"
+          docker load --input "$RUNNER_TEMP/offline-output/$ARCHIVE_NAME"
+          test "$(docker image inspect --format '{{.Id}}' "$sha_tag")" = "$expected_id"
+          test "$(docker image inspect --format '{{.Id}}' "$latest_tag")" = "$expected_id"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$sha_tag")" = 'linux/amd64'
+          container_name="offline-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          volume_name="$container_name-data"
+          cleanup() {
+            docker logs "$container_name" || true
+            docker rm -f "$container_name" || true
+            docker volume rm "$volume_name" || true
+          }
+          trap cleanup EXIT
+          docker run -d --pull never --platform linux/amd64 --name "$container_name" \
+            --read-only --tmpfs /tmp:size=16m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --mount "type=volume,source=$volume_name,target=/data" \
+            -e APP_ORIGIN=http://127.0.0.1:18787 \
+            -p 127.0.0.1:18787:8787 "$sha_tag"
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18787/healthz >/dev/null; then
+              docker exec "$container_name" node -e "if(process.getuid()===0)process.exit(1);require('node:fs').accessSync('/data/setup-token.txt')"
+              curl --fail --silent http://127.0.0.1:18787/reader.html >/dev/null
+              curl --fail --silent http://127.0.0.1:18787/vendor/pdfjs/pdf.mjs >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Upload only the offline archive and checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/offline-output/$ARCHIVE_NAME" \
+            "$RUNNER_TEMP/offline-output/$ARCHIVE_NAME.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          printf 'Offline image: https://github.com/%s/releases/download/%s/%s\n' "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$ARCHIVE_NAME"
+          printf '[Offline image](https://github.com/%s/releases/download/%s/%s)\n\n' "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$ARCHIVE_NAME" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/offline-output/$ARCHIVE_NAME.sha256" >> "$GITHUB_STEP_SUMMARY"

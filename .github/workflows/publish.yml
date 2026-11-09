@@ -39,7 +39,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install pinned reader dependencies
-        run: npm ci --omit=optional --ignore-scripts
+        run: npm ci --ignore-scripts
 
       - name: Test accounts, knowledge catalog and file access
         run: npm test

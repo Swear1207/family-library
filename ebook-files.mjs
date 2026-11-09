@@ -59,6 +59,7 @@ export function createFileLibrary(db, booksDir, store = createCatalogStore(db)) 
           size: file.size, available: !!file.available,
           preview: type?.preview || null,
           folder: directory === '.' ? '' : directory,
+          directory: file.directory,
           mtime: file.mtime,
           metadataStatus: file.metadata_status||null,
         },
@@ -156,7 +157,7 @@ export function createFileLibrary(db, booksDir, store = createCatalogStore(db)) 
     if (!file) throw fail(404, '文件不存在，请重新扫描资料目录');
     const root = await rootPath();
     const parts = file.relative_path.split('/');
-    if (parts.some(part => !part || part === '.' || part === '..' || part.includes('\\'))) throw fail(404, '文件路径无效');
+    if (parts.some(part => !part || part === '.' || part === '..' || process.platform==='win32'&&part.includes('\\'))) throw fail(404, '文件路径无效');
     let full = root;
     let handle;
     try {
@@ -257,5 +258,5 @@ export function createFileLibrary(db, booksDir, store = createCatalogStore(db)) 
 
   const download = (req, res, id, authorize = () => true) => serve(req, res, id, authorize, false);
   const preview = (req, res, id, authorize = () => true) => serve(req, res, id, authorize, true);
-  return { enabled, attach, scan, download, preview, text, status:()=>({...scanState,version:store.version()}), stop:()=>{stopped=true;}, openMetadata:id=>openIndexedFile(id,()=>!stopped) };
+  return { enabled, attach, scan, download, preview, text, status:()=>({...scanState,version:store.version()}), stop:()=>{stopped=true;}, openMetadata:id=>openIndexedFile(id,()=>!stopped), openFileSafe:(id,authorize)=>openIndexedFile(id,authorize) };
 }

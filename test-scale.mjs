@@ -96,5 +96,5 @@ test('v3 migration snapshots the old JSON catalog and preserves sessions, annota
   const snapshots=await fs.readdir(path.join(dataDir,'backups'));assert.equal(snapshots.length,1);
   const backup=new DatabaseSync(path.join(dataDir,'backups',snapshots[0]),{readOnly:true});
   assert.equal(backup.prepare('SELECT books FROM library').get().books,oldJson);assert.equal(backup.prepare('PRAGMA user_version').get().user_version,3);backup.close();
-  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version,4);
+  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version,5);
 });

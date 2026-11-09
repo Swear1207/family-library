@@ -12,10 +12,10 @@
 
 ## 已有项目离线更新
 
-将镜像包和校验文件放入 NAS 的项目目录。以下以 2.0.1 为例；安装其他版本时修改第一行的版本号：
+将镜像包和校验文件放入 NAS 的项目目录。以下以 2.1.0 为例；安装其他版本时修改第一行的版本号：
 
 ```bash
-VERSION=2.0.1
+VERSION=2.1.0
 cd /vol1/1000/compose/family-library && \
 sha256sum -c "family-library-${VERSION}-linux-amd64.tar.gz.sha256" && \
 docker load -i "family-library-${VERSION}-linux-amd64.tar.gz" && \

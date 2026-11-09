@@ -9,6 +9,8 @@ import { createFileLibrary } from './ebook-files.mjs';
 import { validBook, cleanBook, normalizeBook } from './catalog.mjs';
 import { createCatalogStore } from './catalog-store.mjs';
 import { createMetadataQueue } from './metadata-queue.mjs';
+import { createMemberStore } from './member-store.mjs';
+import { createCoverService } from './cover-service.mjs';
 
 const publicDir=fileURLToPath(new URL('./public/',import.meta.url));
 const derive=promisify(scrypt),TTL=7*86400,MAX_BYTES=5*1024*1024;
@@ -28,10 +30,10 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
  const db=new DatabaseSync(path.join(dataDir,'library.sqlite'));
  db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;');
  const schemaVersion=db.prepare('PRAGMA user_version').get().user_version;
- if(schemaVersion>4){db.close();throw Error('Database version is newer than this application')}
- if(schemaVersion>0&&schemaVersion<4){
+ if(schemaVersion>5){db.close();throw Error('Database version is newer than this application')}
+ if(schemaVersion>0&&schemaVersion<5){
   const backupDir=path.join(dataDir,'backups');fs.mkdirSync(backupDir,{recursive:true,mode:0o700});
-  const backup=path.join(backupDir,`before-v4-${Date.now()}-${randomBytes(4).toString('hex')}.sqlite`);
+  const backup=path.join(backupDir,`before-v5-${Date.now()}-${randomBytes(4).toString('hex')}.sqlite`);
   db.exec(`VACUUM INTO '${backup.replace(/'/g,"''")}'`);fs.chmodSync(backup,0o600);
  }
  if(schemaVersion===0){db.exec(`BEGIN IMMEDIATE;
@@ -47,8 +49,10 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
  CREATE TABLE reading_progress (id TEXT PRIMARY KEY, kind TEXT NOT NULL, location TEXT NOT NULL, progress REAL NOT NULL, updated INTEGER NOT NULL);
  PRAGMA user_version=3; COMMIT;`)}
  const store=createCatalogStore(db);
- db.exec('PRAGMA user_version=4');
+ const members=createMemberStore(db);
+ db.exec('PRAGMA user_version=5');
  const files=createFileLibrary(db,booksDir,store);
+ const covers=createCoverService({dataDir,files});
  const metadata=createMetadataQueue(db,files,store,{enabled:metadataEnabled,delayMs:metadataDelayMs,timeoutMs:metadataTimeoutMs});
  const setupPath=path.join(dataDir,'setup-token.txt');
  const getAccount=()=>db.prepare('SELECT * FROM account WHERE id=1').get();
@@ -70,6 +74,58 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
   if(!['GET','HEAD','POST','PUT','DELETE'].includes(req.method))throw error(405,'请求方法不支持');
   if(!['GET','HEAD'].includes(req.method)&&req.headers.origin!==appOrigin)throw error(403,'访问地址与 APP_ORIGIN 配置不一致，请从正确的网址打开');
   if(action==='session'&&req.method==='GET'){const a=getAccount(),signedIn=!!session(req);return send(res,{configured:!!a,authenticated:signedIn,canSetup:!a,fileLibraryEnabled:files.enabled,username:signedIn?a.username:undefined})}
+  if(action==='members'){
+   if(!session(req))throw error(401,'请先登录家庭账号');
+   if(req.method==='GET')return send(res,members.list());
+   if(req.method==='POST'||req.method==='PUT'){
+    const d=await readBody(req);if(!session(req))throw error(401,'登录已失效，请重新登录');
+    if(req.method==='PUT'&&(typeof d.id!=='string'||!d.id))throw error(400,'请选择要修改的成员');
+    return send(res,{member:req.method==='POST'?members.add(d.name):members.rename(d.id,d.name)},req.method==='POST'?201:200);
+   }
+  }
+  if(action==='directories'&&req.method==='GET'){
+   if(!session(req))throw error(401,'请先登录家庭账号');
+   return send(res,store.directories(new URL(req.url,'http://localhost').searchParams));
+  }
+  if(action==='cover'&&['GET','HEAD'].includes(req.method)){
+   if(!session(req))throw error(401,'请先登录家庭账号');
+   const id=new URL(req.url,'http://localhost').searchParams.get('id');
+   if(!store.get(id))throw error(404,'资料不存在');
+   const cover=await covers.get(id,()=>!!session(req));
+   if(!session(req))throw error(401,'登录已失效，请重新登录');
+   res.setHeader('Cache-Control','no-store, private');
+   if(cover.status==='pending'){
+    res.setHeader('Retry-After',String(cover.retryAfter));
+    if(req.method==='HEAD'){res.writeHead(202);return res.end();}
+    return send(res,{status:'pending',retryAfter:cover.retryAfter},202);
+   }
+   if(cover.status!=='ready'){res.writeHead(204);return res.end();}
+   const handle=await fs.promises.open(cover.path,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0));
+   try {
+    const stat=await handle.stat();
+    if(!stat.isFile()||stat.size>1024*1024)throw error(404,'封面暂不可用');
+    const bytes=req.method==='HEAD'?undefined:await handle.readFile();
+    if(!session(req))throw error(401,'登录已失效，请重新登录');
+    res.writeHead(200,{'Content-Type':cover.mime,'Content-Length':stat.size,ETag:cover.etag});res.end(bytes);
+   } finally {await handle.close();}
+   return;
+  }
+  if(action==='recent'&&req.method==='GET'){
+   if(!session(req))throw error(401,'请先登录家庭账号');
+   const params=new URL(req.url,'http://localhost').searchParams,member=members.member(params.get('member')??undefined);
+   const result=members.recent(member.id,Number(params.get('limit')));
+   return send(res,{...result,member,items:files.attach(result.items).map(normalizeBook)});
+  }
+  if(action==='reading-open'&&req.method==='POST'){
+   if(!session(req))throw error(401,'请先登录家庭账号');const d=await readBody(req);
+   if(!session(req))throw error(401,'登录已失效，请重新登录');
+   const member=members.member(d.memberId);
+   if(typeof d.id!=='string')throw error(400,'资料信息不正确');
+   const book=store.get(d.id);if(!book)throw error(404,'资料不存在');
+   const attached=files.attach([book])[0];
+   if(!attached.file?.available||!attached.file.preview)throw error(400,'该资料暂时无法在线阅读');
+   members.opened(member.id,d.id);return send(res,{ok:true});
+  }
   if(action==='scan'&&req.method==='GET'){if(!session(req))throw error(401,'请先登录家庭账号');return send(res,{...files.status(),metadata:metadata.status()})}
   if(action==='scan'&&req.method==='POST'){if(!session(req))throw error(401,'请先登录家庭账号');const d=await readBody(req);if(d.background===true){autoScan(true);return send(res,{...files.status(),metadata:metadata.status()},202)}return send(res,await files.scan(()=>!!session(req),{retryMetadata:true}))}
   if(['download','content'].includes(action)&&['GET','HEAD'].includes(req.method)){
@@ -89,7 +145,8 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
    if(req.method==='GET'){
     const book=store.get(id);
     if(!book)throw error(404,'资料不存在，请刷新资料库');
-    return send(res,{book:normalizeBook(files.attach([book])[0]),version:store.version(),recordVersion:digest(JSON.stringify(book)),progress:db.prepare('SELECT kind,location,progress,updated FROM reading_progress WHERE id=?').get(id)||null});
+    const member=members.member(new URL(req.url,'http://localhost').searchParams.get('member')??undefined);
+    return send(res,{book:normalizeBook(files.attach([book])[0]),version:store.version(),recordVersion:digest(JSON.stringify(book)),member,progress:members.progress(member.id,id)});
    }
    if(req.method==='PUT'||req.method==='DELETE'){
     const d=await readBody(req);if(!session(req))throw error(401,'登录已失效，请重新登录');
@@ -101,7 +158,7 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
      const current=store.get(target);
      if(d.recordVersion!==undefined ? (current?digest(JSON.stringify(current)): 'new')!==d.recordVersion : store.version()!==d.version)throw error(409,'这条资料刚有更新，请刷新后重新核对保存');
      if(req.method==='DELETE'){
-      if(!store.get(target))throw error(404,'资料不存在');store.remove(target);db.prepare('DELETE FROM reading_progress WHERE id=?').run(target);
+      if(!store.get(target))throw error(404,'资料不存在');store.remove(target);members.remove(target);
      }else{
       store.put(cleanBook(d.book),{manual:true});
      }
@@ -111,13 +168,13 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
   }
   if(action==='progress'&&req.method==='POST'){
    if(!session(req))throw error(401,'请先登录家庭账号');const d=await readBody(req);
+   const member=members.member(d.memberId);
    if(typeof d.id!=='string'||!['pdf','epub','text','audio','video','image'].includes(d.kind)||typeof d.location!=='string'||d.location.length>2048||!Number.isFinite(d.progress)||d.progress<0||d.progress>1)throw error(400,'阅读进度格式不正确');
    const book=store.get(d.id);
    if(!book)throw error(404,'资料不存在');const attached=files.attach([book])[0];
    if(!attached.file?.available||attached.file.preview!==d.kind)throw error(400,'该资料不支持此类型的阅读进度');
-   if(!session(req))throw error(401,'登录已失效，请重新登录');const updated=Date.now();
-   db.prepare('INSERT INTO reading_progress (id,kind,location,progress,updated) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,location=excluded.location,progress=excluded.progress,updated=excluded.updated').run(d.id,d.kind,d.location,d.progress,updated);
-   return send(res,{ok:true,updated});
+   if(!session(req))throw error(401,'登录已失效，请重新登录');
+   return send(res,members.saveProgress(member.id,d));
   }
   if(action==='setup'&&req.method==='POST'){
    limited(req);if(getAccount())throw error(409,'账号已设置，请直接登录');const d=await readBody(req);
@@ -147,7 +204,7 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
    if(!session(req))throw error(401,'请先登录家庭账号');
    if(req.method==='GET')return send(res,{books:files.attach(store.all()),version:store.version()});
    if(req.method==='PUT'){const d=await readBody(req,256*1024*1024);if(!session(req))throw error(401,'登录已失效，请重新登录');if(!Number.isSafeInteger(d.version)||!Array.isArray(d.books)||!d.books.every(validBook)||new Set(d.books.map(b=>b.id)).size!==d.books.length)throw error(400,'图书数据格式不正确');
-    const result=transaction(()=>{if(store.version()!==d.version)throw error(409,'家人刚更新了书架，请取回最新数据再保存');store.replace(d.books);return {ok:true,version:store.bump()};});
+    const result=transaction(()=>{if(store.version()!==d.version)throw error(409,'家人刚更新了书架，请取回最新数据再保存');store.replace(d.books);members.prune();return {ok:true,version:store.bump()};});
     return send(res,result);
    }
   }
@@ -158,7 +215,7 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
  const vendors=new Map([['/vendor/jszip.min.js','jszip/dist/jszip.min.js'],['/vendor/epub.min.js','epubjs/dist/epub.min.js'],['/vendor/purify.min.js','dompurify/dist/purify.min.js'],['/vendor/pdfjs/pdf.mjs','pdfjs-dist/legacy/build/pdf.mjs'],['/vendor/pdfjs/pdf.worker.mjs','pdfjs-dist/legacy/build/pdf.worker.mjs'],['/vendor/pdfjs/worker.mjs','pdfjs-dist/legacy/build/pdf.worker.mjs']]);
  const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.webmanifest':'application/manifest+json','.wasm':'application/wasm','.ttf':'font/ttf','.otf':'font/otf'};
  const server=http.createServer(async(req,res)=>{
-  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
+  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
   try{const p=new URL(req.url,'http://localhost').pathname;
    if(p==='/reader.html'||p.startsWith('/vendor/'))res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: blob:; connect-src 'self' blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
    if(p==='/healthz'&&req.method==='GET'){db.prepare('SELECT 1').get();return send(res,{ok:true})}
@@ -172,8 +229,8 @@ export function createLibraryServer({dataDir,origin,booksDir,autoScanMs=0,metada
   }catch(e){if(!e.status)console.error('Request failed:',e.name);if(!res.headersSent)send(res,{error:e.status?e.message:'服务暂时不可用，请稍后重试'},e.status||503);else res.end()}
  });
  server.requestTimeout=15000;server.headersTimeout=10000;
- const close=()=>new Promise((resolve,reject)=>{closing=true;files.stop();clearInterval(scanTimer);clearTimeout(firstScan);server.close(async e=>{if(backgroundScan)await backgroundScan;await metadata.stop();try{db.close()}catch{}e?reject(e):resolve()});server.closeIdleConnections()});
- return {server,db,store,files,metadata,close};
+ const close=()=>new Promise((resolve,reject)=>{closing=true;files.stop();clearInterval(scanTimer);clearTimeout(firstScan);server.close(async e=>{if(backgroundScan)await backgroundScan;await Promise.all([metadata.stop(),covers.stop()]);try{db.close()}catch{}e?reject(e):resolve()});server.closeIdleConnections()});
+ return {server,db,store,files,metadata,members,covers,close};
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

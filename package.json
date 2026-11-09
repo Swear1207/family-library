@@ -1,13 +1,21 @@
 {
   "name": "family-library",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "description": "A self-hosted family research and media library",
-  "engines": { "node": ">=24" },
-  "scripts": { "start": "node server.mjs", "test": "node --test test.mjs test-files.mjs test-knowledge.mjs test-metadata.mjs test-scale.mjs test-background.mjs" },
-  "overrides": { "@xmldom/xmldom": "0.8.15" },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test.mjs test-files.mjs test-knowledge.mjs test-metadata.mjs test-scale.mjs test-background.mjs test-members.mjs test-directories.mjs test-covers.mjs"
+  },
+  "overrides": {
+    "@xmldom/xmldom": "0.8.15"
+  },
   "dependencies": {
+    "@napi-rs/canvas": "1.1.0",
     "dompurify": "3.4.17",
     "epubjs": "0.3.93",
     "jszip": "3.10.2",

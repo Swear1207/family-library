@@ -42,7 +42,7 @@
   <div id="appShell" hidden>
     <header class="site-header">
       <a class="brand" href="./"><img src="icon.svg" alt="" width="40" height="40"><span>家庭知库<small>一屋书 · FAMILY KNOWLEDGE</small></span></a>
-      <div class="header-location"><span class="status-dot" aria-hidden="true"></span><span>家庭共享资料库</span></div>
+      <div class="member-picker"><label for="memberSelect">阅读成员</label><select id="memberSelect" aria-label="当前阅读成员" disabled><option value="family">家庭共享</option></select><button id="manageMembers" class="text-button" type="button" aria-label="管理阅读成员">管理</button></div>
       <div class="header-actions">
         <button id="scanBooks" class="button secondary" hidden><span aria-hidden="true">↻</span> 扫描资料</button>
         <button id="add" class="button primary"><span aria-hidden="true">＋</span> 新增资料</button>
@@ -79,15 +79,26 @@
       <section class="stats" aria-label="资料库统计">
         <div><span>全部资料</span><strong id="total">—</strong></div>
         <div><span>本地文件</span><strong id="filesCount">—</strong></div>
-        <div><span>正在阅读</span><strong id="reading">—</strong></div>
-        <div><span>已经读完</span><strong id="done">—</strong></div>
+        <div><span>家庭在读</span><strong id="reading">—</strong></div>
+        <div><span>家庭读完</span><strong id="done">—</strong></div>
         <button id="favoritesShortcut" type="button" aria-pressed="false"><span>已收藏 <span aria-hidden="true">☆</span></span><strong id="favoritesCount">—</strong></button>
+      </section>
+      <section id="recentSection" class="recent-section" aria-labelledby="recentHeading" hidden>
+        <div class="recent-heading"><div><p class="eyebrow">PICK UP WHERE YOU LEFT OFF</p><h2 id="recentHeading">最近阅读 <span id="recentMember"></span></h2></div><button id="refreshRecent" class="text-button" type="button">刷新</button></div>
+        <p id="recentMessage" class="recent-message" role="status"></p><div id="recentList" class="recent-list"></div><p id="recentSummary" class="recent-summary" hidden></p>
       </section>
       <p id="scanResult" class="notice scan-result" role="status" hidden></p>
       <div class="collection-layout">
         <div id="desktopFilters" class="desktop-filters">
           <aside id="filters" class="filters" aria-label="筛选资料">
             <div class="filter-heading"><h2>筛选资料</h2><button id="resetFilters" class="text-button" type="button">重置</button></div>
+            <section class="filter-group directory-group" aria-labelledby="directoryHeading"><h3 id="directoryHeading">按目录浏览</h3>
+              <nav id="directoryBreadcrumbs" class="directory-breadcrumbs" aria-label="当前资料目录"></nav>
+              <label class="checkbox-label directory-recursive"><input id="recursiveFilter" type="checkbox" checked><span>包括子目录</span></label>
+              <form id="directorySearch" class="directory-search" role="search"><label class="sr-only" for="directoryQuery">查找当前目录下的子目录</label><input id="directoryQuery" type="search" maxlength="200" placeholder="查找子目录" autocomplete="off"><button type="submit" aria-label="查找子目录">⌕</button></form>
+              <p id="directoryMessage" class="directory-message" role="status"></p><div id="directoryList" class="directory-list" aria-label="子目录"></div>
+              <div id="directoryPagination" class="directory-pagination" hidden><button id="previousDirectoryPage" type="button" aria-label="上一页目录">←</button><span id="directoryPageLabel"></span><button id="nextDirectoryPage" type="button" aria-label="下一页目录">→</button></div>
+            </section>
             <section class="filter-group"><h3>资料类型</h3><div id="typeFacets" class="type-facets"></div></section>
             <section class="filter-group filter-fields">
               <label>年份范围<span class="year-range"><input id="yearFrom" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="起始年份" aria-label="起始年份"><span aria-hidden="true">—</span><input id="yearTo" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="结束年份" aria-label="结束年份"></span></label>
@@ -95,7 +106,7 @@
               <label>主题分类<select id="categoryFilter"><option value="">全部分类</option></select></label>
               <label>标签<select id="tagFilter"><option value="">全部标签</option></select></label>
               <label>文件格式<select id="formatFilter"><option value="">全部格式</option></select></label>
-              <label>阅读状态<select id="statusFilter"><option value="">全部状态</option><option>未读</option><option>在读</option><option>读完</option><option value="lent">已借出</option></select></label>
+              <label>家庭阅读状态<select id="statusFilter"><option value="">全部状态</option><option>未读</option><option>在读</option><option>读完</option><option value="lent">已借出</option></select></label>
               <label>文件状态<select id="availabilityFilter"><option value="">全部资料</option><option value="available">文件可用</option><option value="missing">文件缺失</option></select></label>
               <label class="checkbox-label"><input id="favoriteFilter" type="checkbox"><span>只看已收藏</span></label>
             </section>
@@ -127,6 +138,7 @@
     <div class="modal-head detail-head"><div><p id="detailType" class="eyebrow">RESOURCE DETAILS</p><h2 id="detailTitle">正在读取资料…</h2></div><button id="closeDetail" type="button" class="icon-button" aria-label="关闭资料详情">×</button></div>
     <p id="detailError" class="form-error" role="alert" hidden></p>
     <div id="detailContent" hidden>
+      <div class="detail-reading-summary"><div id="detailCover" class="detail-cover"></div><div class="detail-member-progress"><p id="detailMemberName"></p><strong id="detailProgressLabel"></strong><progress id="detailProgress" max="1" value="0" aria-label="当前成员阅读进度" hidden></progress><p class="muted">阅读进度按成员保存，资料与笔记仍全家共享。</p></div></div>
       <div class="detail-primary-actions"><div id="detailFileActions" class="file-actions"></div><button id="detailFavorite" class="button secondary" type="button">☆ 收藏</button></div>
       <dl id="detailMetadata" class="metadata-grid"></dl>
       <p id="detailMetadataHint" class="muted" hidden></p>
@@ -154,7 +166,7 @@
         <label class="checkbox-label"><input name="favorite" type="checkbox"><span>加入家庭收藏</span></label>
       </section>
       <section class="edit-section"><h3>家庭阅读</h3>
-        <div class="field-grid"><label>阅读状态<select name="status"><option>未读</option><option>在读</option><option>读完</option></select></label><label>借阅人<input name="borrower" maxlength="80" placeholder="实体资料借给了谁？"></label></div>
+        <div class="field-grid"><label>家庭阅读状态<select name="status"><option>未读</option><option>在读</option><option>读完</option></select></label><label>借阅人<input name="borrower" maxlength="80" placeholder="实体资料借给了谁？"></label></div>
         <label>收纳位置<input name="location" maxlength="300" placeholder="书架位置或资料存放说明"></label>
         <label>笔记<textarea name="notes" maxlength="20000" rows="5" placeholder="记录摘录、思考或家人的阅读心得…"></textarea></label>
       </section>
@@ -164,6 +176,7 @@
     </form>
   </dialog>
   <datalist id="categorySuggestions"></datalist>
+  <dialog id="memberDialog" aria-labelledby="memberTitle"><div class="modal-head"><div><p class="eyebrow">YOUR OWN READING JOURNEY</p><h2 id="memberTitle">阅读成员</h2></div><button id="closeMembers" class="icon-button" type="button" aria-label="关闭成员管理">×</button></div><p class="muted member-explanation">全家使用同一个账号。每位成员分别记录最近阅读和阅读进度，书架、收藏和笔记继续共享。选择只保存在当前浏览器。</p><div id="memberList" class="member-list"></div><form id="memberForm"><h3 id="memberFormTitle">新增成员</h3><label>成员名称<input id="memberName" name="name" required maxlength="40" autocomplete="off" placeholder="例如 妈妈、小宇"></label><p id="memberError" class="form-error" role="alert"></p><div class="member-form-actions"><button id="cancelMemberRename" class="text-button" type="button" hidden>取消改名</button><button id="saveMember" class="button primary" type="submit">新增成员</button></div></form></dialog>
   <dialog id="passwordDialog" aria-labelledby="passwordTitle"><form id="passwordForm"><div class="modal-head"><div><p class="eyebrow">FAMILY ACCOUNT</p><h2 id="passwordTitle">修改家庭密码</h2></div><button id="passwordClose" type="button" class="icon-button" aria-label="关闭密码设置">×</button></div><p class="muted">修改后，其他家人需要使用新密码重新登录。</p><label>原密码<input name="currentPassword" type="password" autocomplete="current-password" required maxlength="128"></label><label>新密码<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128" placeholder="至少 12 位"></label><label>确认新密码<input name="confirmPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label><p id="passwordError" class="form-error" role="alert"></p><button class="button primary full-width" type="submit">保存新密码</button></form></dialog>
   <dialog id="infoDialog" aria-labelledby="infoTitle"><div class="modal-head"><div><p class="eyebrow">KNOWLEDGE, WITH YOU</p><h2 id="infoTitle">把知库放进手机</h2></div><button id="infoClose" type="button" class="icon-button" aria-label="关闭使用说明">×</button></div><ol class="help-steps"><li>在 iPhone 的 Safari 中打开家庭知库。</li><li>点击“分享”，选择“添加到主屏幕”。</li><li>使用家庭账号登录，随时检索和阅读资料。</li></ol><p class="notice">访问时需要连接家庭 NAS 所在网络，或通过你配置的远程连接访问。资料与笔记在 NAS 保存，当前不提供离线同步。</p><p class="muted">下载后可以用手机上的相应应用打开。文件移动后请重新扫描；删除资料记录不会删除 NAS 原文件。</p></dialog>
   <input id="importFile" type="file" accept="application/json,.json" hidden>

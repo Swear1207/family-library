@@ -6,6 +6,10 @@
 !metadata-queue.mjs
 !metadata-worker.mjs
 !metadata-extractor.mjs
+!member-store.mjs
+!cover-service.mjs
+!cover-worker.mjs
+!cover-renderer.mjs
 !file-types.mjs
 !package.json
 !package-lock.json

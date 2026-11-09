@@ -14,6 +14,7 @@ zip.file('compose.yaml',await fs.readFile('compose.yaml'));
 const env=(await fs.readFile('.env.example','utf8')).replace(/^LIBRARY_IMAGE=.*$/m,`LIBRARY_IMAGE=${image}`);
 zip.file('.env.example',env);
 zip.file('README.md',await fs.readFile('README.md'));
+zip.file('OFFLINE.md',await fs.readFile('OFFLINE.md'));
 await fs.mkdir('release-output',{recursive:true});
 const bytes=await zip.generateAsync({type:'nodebuffer',compression:'DEFLATE'});
 await fs.writeFile(path.join('release-output',archiveName),bytes);
@@ -26,7 +27,7 @@ async function api(route,method='GET',body){
 }
 let release=await api(`/releases/tags/${tag}`);
 if(release&&release.target_commitish!==sha)throw Error('Existing release targets a different source revision');
-if(!release)release=await api('/releases','POST',{tag_name:tag,target_commitish:sha,name:`家庭知库 ${version}`,draft:false,prerelease:false,body:`家庭资料库：分类检索、标签、文献信息、PDF/EPUB/文本阅读、图片与音视频预览。\n\n镜像：\`${image}\`\n\n附件中的 Compose 部署 ZIP 包含配置示例与升级说明，不含镜像本体或家庭资料。发布流程随后会上传 \`family-library-${version}-linux-amd64.tar.gz\` 及 SHA256 校验文件；它是可直接 \`docker load\` 的完整 amd64 离线镜像。请等待本次 Actions 发布完成再下载全部附件。\n\n已有用户保留原目录、.env 和数据卷。离线导入后用 \`docker compose up -d --pull never --no-build\` 启动。操作说明见 [OFFLINE.md](https://github.com/${repository}/blob/${sha}/OFFLINE.md)，完整支持范围和升级备份说明见仓库 README。`});
+if(!release)release=await api('/releases','POST',{tag_name:tag,target_commitish:sha,name:`家庭知库 ${version}`,draft:false,prerelease:false,body:`家庭资料库：目录与组合筛选、按需生成封面缩略图、最近阅读、共用账号下的成员独立进度。保留后台大目录扫描、文献信息补全、PDF连续滚动及其他预览。\n\n镜像：\`${image}\`\n\n附件中的 Compose 部署 ZIP 包含配置示例与升级说明，不含镜像本体或家庭资料。发布流程随后会上传 \`family-library-${version}-linux-amd64.tar.gz\` 及 SHA256 校验文件；它是可直接 \`docker load\` 的完整 amd64 离线镜像。请等待本次 Actions 发布完成再下载全部附件。\n\n已有用户保留原目录、.env 和数据卷。离线导入后用 \`docker compose up -d --pull never --no-build --force-recreate\` 启动。操作说明见 [OFFLINE.md](https://github.com/${repository}/blob/${sha}/OFFLINE.md)，完整支持范围和升级备份说明见仓库 README。`});
 for(const asset of release.assets||[])if(asset.name===archiveName)await api(`/releases/assets/${asset.id}`,'DELETE');
 const upload=release.upload_url.replace(/\{.*$/,'')+'?name='+encodeURIComponent(archiveName);
 if(new URL(upload).hostname!=='uploads.github.com')throw Error('Unexpected upload host');

@@ -4,10 +4,25 @@ import { fileType } from './file-types.mjs';
 const failure = (status, message) => Object.assign(new Error(message), {status});
 const lower = value => String(value || '').toLocaleLowerCase();
 const METADATA_FIELDS = ['title','author','year','source','doi','abstract'];
+const parentDirectory = value => { const p=String(value||'');return p.slice(0,Math.max(0,p.lastIndexOf('/'))); };
+function directoryAncestors(relative) {
+  const parts=String(relative||'').split('/');
+  if(parts.some(part=>!part||part==='.'||part==='..'||/[\u0000-\u001f\u007f]/.test(part)))return '[]';
+  parts.pop();let parent='';
+  return JSON.stringify(parts.map(name=>{const path=parent?parent+'/'+name:name,entry={path,parent,name};parent=path;return entry;}));
+}
+function directoryPath(value) {
+  const result=String(value||'');
+  if(result.length>4096||/[\u0000-\u001f\u007f]/.test(result)||result&&result.split('/').some(part=>!part||part==='.'||part==='..'))throw failure(400,'目录路径不正确，请从目录列表选择');
+  return result;
+}
+const positiveParameter=(params,name,fallback,max)=>{const n=Number(params.get(name));return Number.isSafeInteger(n)&&n>0?Math.min(n,max):fallback;};
 
 // Records and file indexes stay in SQLite; ordinary requests only decode one page.
 export function createCatalogStore(db) {
   db.function('unicode_fold',{deterministic:true},value=>lower(value));
+  db.function('file_parent_directory',{deterministic:true},parentDirectory);
+  db.function('file_directory_ancestors',{deterministic:true},directoryAncestors);
   db.exec(`CREATE TABLE IF NOT EXISTS catalog_items (
     id TEXT PRIMARY KEY, data TEXT NOT NULL, title TEXT NOT NULL, author TEXT NOT NULL,
     category TEXT NOT NULL, status TEXT NOT NULL, resource_type TEXT NOT NULL,
@@ -26,7 +41,10 @@ export function createCatalogStore(db) {
   const columns = new Set(db.prepare('PRAGMA table_info(ebook_files)').all().map(c=>c.name));
   if (!columns.has('format')) db.exec("ALTER TABLE ebook_files ADD COLUMN format TEXT NOT NULL DEFAULT ''");
   if (!columns.has('scan_id')) db.exec("ALTER TABLE ebook_files ADD COLUMN scan_id TEXT NOT NULL DEFAULT ''");
-  db.exec('CREATE INDEX IF NOT EXISTS files_format ON ebook_files(format); CREATE INDEX IF NOT EXISTS files_available ON ebook_files(available);');
+  if (!columns.has('directory')) db.exec("ALTER TABLE ebook_files ADD COLUMN directory TEXT NOT NULL DEFAULT ''");
+  if (!columns.has('directory_ancestors')) db.exec("ALTER TABLE ebook_files ADD COLUMN directory_ancestors TEXT NOT NULL DEFAULT '[]'");
+  db.exec(`CREATE INDEX IF NOT EXISTS files_format ON ebook_files(format); CREATE INDEX IF NOT EXISTS files_available ON ebook_files(available);
+    CREATE INDEX IF NOT EXISTS files_directory ON ebook_files(directory,id);`);
   const getRow = db.prepare('SELECT data FROM catalog_items WHERE id=?');
   const upsert = db.prepare(`INSERT INTO catalog_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
     data=excluded.data,title=excluded.title,author=excluded.author,category=excluded.category,status=excluded.status,
@@ -57,6 +75,54 @@ export function createCatalogStore(db) {
       for (const file of db.prepare('SELECT id,relative_path FROM ebook_files').all()) updateFormat.run(file.relative_path.split('.').pop().toUpperCase(),file.id);
       db.prepare("UPDATE library SET books='[]' WHERE id=1").run(); db.exec('COMMIT');
     } catch (error) {db.exec('ROLLBACK');throw error;}
+  }
+  // Counts include linked missing files, as the unfiltered catalog does. Keeping
+  // them in triggers also covers restore/delete and either file/record insert order.
+  db.exec(`CREATE TABLE IF NOT EXISTS catalog_directories (
+      path TEXT PRIMARY KEY,parent TEXT NOT NULL,name TEXT NOT NULL,count INTEGER NOT NULL CHECK(count>=0));
+    CREATE INDEX IF NOT EXISTS directories_parent ON catalog_directories(parent,path);
+    CREATE TABLE IF NOT EXISTS catalog_directory_state (id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
+    CREATE TRIGGER IF NOT EXISTS directories_file_insert AFTER INSERT ON ebook_files BEGIN
+      UPDATE ebook_files SET directory=file_parent_directory(NEW.relative_path),directory_ancestors=file_directory_ancestors(NEW.relative_path) WHERE id=NEW.id;
+      INSERT INTO catalog_directories(path,parent,name,count)
+        SELECT json_extract(j.value,'$.path'),json_extract(j.value,'$.parent'),json_extract(j.value,'$.name'),1
+        FROM json_each(file_directory_ancestors(NEW.relative_path)) j WHERE EXISTS(SELECT 1 FROM catalog_items WHERE id=NEW.id)
+        ON CONFLICT(path) DO UPDATE SET count=count+1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS directories_record_insert AFTER INSERT ON catalog_items BEGIN
+      INSERT INTO catalog_directories(path,parent,name,count)
+        SELECT json_extract(j.value,'$.path'),json_extract(j.value,'$.parent'),json_extract(j.value,'$.name'),1
+        FROM ebook_files f,json_each(f.directory_ancestors) j WHERE f.id=NEW.id
+        ON CONFLICT(path) DO UPDATE SET count=count+1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS directories_record_delete AFTER DELETE ON catalog_items BEGIN
+      UPDATE catalog_directories SET count=count-1 WHERE path IN (SELECT json_extract(j.value,'$.path') FROM ebook_files f,json_each(f.directory_ancestors) j WHERE f.id=OLD.id);
+      DELETE FROM catalog_directories WHERE count=0 AND path IN (SELECT json_extract(j.value,'$.path') FROM ebook_files f,json_each(f.directory_ancestors) j WHERE f.id=OLD.id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS directories_file_delete AFTER DELETE ON ebook_files WHEN EXISTS(SELECT 1 FROM catalog_items WHERE id=OLD.id) BEGIN
+      UPDATE catalog_directories SET count=count-1 WHERE path IN (SELECT json_extract(value,'$.path') FROM json_each(OLD.directory_ancestors));
+      DELETE FROM catalog_directories WHERE count=0 AND path IN (SELECT json_extract(value,'$.path') FROM json_each(OLD.directory_ancestors));
+    END;
+    CREATE TRIGGER IF NOT EXISTS directories_file_move AFTER UPDATE OF relative_path ON ebook_files WHEN OLD.relative_path<>NEW.relative_path BEGIN
+      UPDATE catalog_directories SET count=count-1 WHERE EXISTS(SELECT 1 FROM catalog_items WHERE id=NEW.id)
+        AND path IN (SELECT json_extract(value,'$.path') FROM json_each(OLD.directory_ancestors));
+      DELETE FROM catalog_directories WHERE count=0 AND path IN (SELECT json_extract(value,'$.path') FROM json_each(OLD.directory_ancestors));
+      UPDATE ebook_files SET directory=file_parent_directory(NEW.relative_path),directory_ancestors=file_directory_ancestors(NEW.relative_path) WHERE id=NEW.id;
+      INSERT INTO catalog_directories(path,parent,name,count)
+        SELECT json_extract(j.value,'$.path'),json_extract(j.value,'$.parent'),json_extract(j.value,'$.name'),1
+        FROM json_each(file_directory_ancestors(NEW.relative_path)) j WHERE EXISTS(SELECT 1 FROM catalog_items WHERE id=NEW.id)
+        ON CONFLICT(path) DO UPDATE SET count=count+1;
+    END;`);
+  if(!db.prepare('SELECT version FROM catalog_directory_state WHERE id=1').get()){
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      db.exec(`UPDATE ebook_files SET directory=file_parent_directory(relative_path),directory_ancestors=file_directory_ancestors(relative_path);
+        DELETE FROM catalog_directories;
+        INSERT INTO catalog_directories(path,parent,name,count)
+          SELECT json_extract(j.value,'$.path'),json_extract(j.value,'$.parent'),json_extract(j.value,'$.name'),count(*)
+          FROM ebook_files f JOIN catalog_items c ON c.id=f.id,json_each(f.directory_ancestors) j GROUP BY json_extract(j.value,'$.path');
+        INSERT INTO catalog_directory_state VALUES(1,1);COMMIT;`);
+    }catch(error){db.exec('ROLLBACK');throw error;}
   }
   const version = () => db.prepare('SELECT version FROM library WHERE id=1').get()?.version || 0;
   const bump = () => db.prepare('UPDATE library SET version=version+1 WHERE id=1 RETURNING version').get().version;
@@ -104,16 +170,36 @@ export function createCatalogStore(db) {
     if(params.get('favorite')==='1')add('c.favorite=1');
     if(params.get('availability')==='available')add('f.available=1');
     if(params.get('availability')==='missing')add('f.available=0');
+    if(params.has('recursive')&&!['0','1'].includes(params.get('recursive')))throw failure(400,'子目录筛选参数不正确');
+    const directory=directoryPath(params.get('directory'));
+    if(directory||params.get('recursive')==='0'){
+      if(params.get('recursive')==='0')add('c.id IN (SELECT id FROM ebook_files WHERE directory=?)',directory);
+      else{
+        // A slash-delimited binary range treats %, _, backslashes and Unicode
+        // literally and excludes similarly named sibling directories.
+        clauses.push('c.id IN (SELECT id FROM ebook_files WHERE directory=? UNION ALL SELECT id FROM ebook_files WHERE directory>=? AND directory<?)');
+        values.push(directory,directory+'/',directory+'0');
+      }
+    }
     const field=params.get('field'),target=['title','author','doi'].includes(field)?`unicode_fold(c.${field})`:"(c.search_text||char(10)||unicode_fold(coalesce(f.relative_path,'')))";
     for(const term of lower(params.get('q')).trim().slice(0,1000).split(/\s+/).filter(Boolean))add(`instr(${target},?)>0`,term);
     const where=clauses.length?' WHERE '+clauses.join(' AND '):'';
     const base=' FROM catalog_items c LEFT JOIN ebook_files f ON f.id=c.id';
     const total=db.prepare('SELECT count(*) n'+base+where).get(...values).n;
-    const number=(name,fallback,max)=>{const n=Number(params.get(name));return Number.isSafeInteger(n)&&n>0?Math.min(n,max):fallback;};
-    const pageSize=number('pageSize',25,100),page=Math.min(number('page',1,Number.MAX_SAFE_INTEGER),Math.max(1,Math.ceil(total/pageSize)));
+    const pageSize=positiveParameter(params,'pageSize',25,100),page=Math.min(positiveParameter(params,'page',1,Number.MAX_SAFE_INTEGER),Math.max(1,Math.ceil(total/pageSize)));
     const sort=params.get('sort'),order=sort==='title'?'c.title COLLATE NOCASE,c.id':sort==='year'?'c.year DESC,c.created DESC,c.id':'c.created DESC,c.id';
     const items=db.prepare('SELECT c.data'+base+where+' ORDER BY '+order+' LIMIT ? OFFSET ?').all(...values,pageSize,(page-1)*pageSize).map(row=>JSON.parse(row.data));
     return {items,total,page,pageSize,version:version(),...summary()};
   }
-  return {get,put,all,replace,remove,enrich,search,version,bump};
+  function directories(params) {
+    const path=directoryPath(params.get('path')),values=[path],clauses=['parent=?'];
+    for(const term of lower(params.get('q')).trim().slice(0,1000).split(/\s+/).filter(Boolean)){clauses.push('instr(unicode_fold(name),?)>0');values.push(term);}
+    const where=' WHERE '+clauses.join(' AND ');
+    const total=db.prepare('SELECT count(*) n FROM catalog_directories'+where).get(...values).n;
+    const pageSize=positiveParameter(params,'pageSize',100,100),pages=Math.max(1,Math.ceil(total/pageSize));
+    const page=Math.min(positiveParameter(params,'page',1,Number.MAX_SAFE_INTEGER),pages);
+    const items=db.prepare('SELECT path,name,count FROM catalog_directories'+where+' ORDER BY path LIMIT ? OFFSET ?').all(...values,pageSize,(page-1)*pageSize);
+    return {path,items,total,page,pageSize,pages};
+  }
+  return {get,put,all,replace,remove,enrich,search,directories,version,bump};
 }

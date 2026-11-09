@@ -1,5 +1,8 @@
 const $ = (selector) => document.querySelector(selector);
 const id = new URL(location.href).searchParams.get('id');
+// Bind this reading tab to its URL member, even if another tab changes the picker.
+const memberId = new URL(location.href).searchParams.get('member') ?? 'family';
+let memberName = '家庭共享';
 const contentURL = '/api/family/content?id=' + encodeURIComponent(id || '');
 const downloadURL = '/api/family/download?id=' + encodeURIComponent(id || '');
 const viewer = $('#viewer');
@@ -71,7 +74,7 @@ function showError(message, title = '暂时无法预览', retry = true) {
 function goToLogin() {
   if (leaving) return;
   leaving = true;
-  location.replace('/library.html?next=' + encodeURIComponent('/reader.html?id=' + encodeURIComponent(id || '')));
+  location.replace('/library.html?next=' + encodeURIComponent('/reader.html?id=' + encodeURIComponent(id || '') + '&member=' + encodeURIComponent(memberId)));
 }
 async function responseOrError(response) {
   if (response.status === 401) { goToLogin(); throw new Error('登录已过期，请重新登录。'); }
@@ -97,7 +100,7 @@ function remember(kind, locationValue, value, label, save = true) {
   $('#positionLabel').textContent = label;
   const locationText = String(locationValue);
   if (!save || locationText.length > 2048 || !Number.isFinite(value)) return;
-  const next = { id, kind, location: locationText, progress: clamp(value) };
+  const next = { id, memberId, kind, location: locationText, progress: clamp(value) };
   if (progressKey(next) === lastSavedKey && !saving) {
     pendingProgress = null; clearTimeout(saveTimer); saveTimer = null;
     return;
@@ -118,7 +121,7 @@ async function saveProgress() {
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value)
     }));
     lastSavedKey = progressKey(value);
-    $('#saveStatus').textContent = '已保存 · 全家共用进度';
+    $('#saveStatus').textContent = '已保存 · ' + memberName;
     $('#saveStatus').classList.remove('save-error');
   } catch (error) {
     if (!pendingProgress) pendingProgress = value;
@@ -780,7 +783,12 @@ async function boot() {
   } catch {}
   document.body.dataset.theme = theme;
   document.documentElement.style.setProperty('--page-size', fontSize + 'px');
-  const data = await api('document?id=' + encodeURIComponent(id));
+  if (!memberId || memberId.length > 100 || /[\x00-\x1f]/.test(memberId)) { showError('阅读成员无效，请返回资料库重新选择。', '请选择阅读成员', false); return; }
+  const data = await api('document?id=' + encodeURIComponent(id) + '&member=' + encodeURIComponent(memberId));
+  memberName = data.member?.name || (memberId === 'family' ? '家庭共享' : '当前成员');
+  $('#readerMember').textContent = '阅读成员 · ' + memberName;
+  $('#readerMember').title = '此阅读页的进度保存到「' + memberName + '」';
+  $('#positionLabel').textContent = '正在读取' + memberName + '的阅读进度';
   const book = data.book;
   if (!book) throw new Error('这份资料已不在资料库中。');
   savedProgress = data.progress || null;
@@ -792,6 +800,8 @@ async function boot() {
   if (!file?.available) { showError(file ? '原文件已移动或暂时不可读取。请检查 NAS 书籍目录，再扫描资料库。' : '这条资料尚未关联原文件，当前无法预览或下载。', '暂时找不到原文件', false); return; }
   for (const link of [$('#download'), $('#fallbackDownload')]) { link.href = downloadURL; link.download = file.name || ''; link.hidden = false; }
   await responseOrError(await fetch(contentURL, { method: 'HEAD', credentials: 'same-origin', cache: 'no-store' }));
+  try { await api('reading-open', { id, memberId }); }
+  catch (error) { if (leaving) return; $('#saveStatus').textContent = '最近阅读暂未记录；可以继续阅读'; $('#saveStatus').classList.add('save-error'); }
   if (file.preview === 'pdf') await openPDF();
   else if (file.preview === 'epub') await openEPUB(book);
   else if (file.preview === 'text') await openText();

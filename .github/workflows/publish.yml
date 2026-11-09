@@ -1,0 +1,104 @@
+name: Publish private library image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: family-library-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Test account, ebook and download behavior
+        run: node --test test.mjs test-files.mjs
+
+      - name: Build and check the local container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t family-library:smoke .
+          cleanup() {
+            docker logs family-library-smoke || true
+            docker rm -f family-library-smoke || true
+            docker volume rm family-library-smoke-data || true
+          }
+          trap cleanup EXIT
+          docker run -d --name family-library-smoke \
+            --read-only --tmpfs /tmp:size=16m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --mount type=volume,source=family-library-smoke-data,target=/data \
+            -e APP_ORIGIN=http://127.0.0.1:8787 \
+            -p 127.0.0.1:8787:8787 family-library:smoke
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then
+              docker exec family-library-smoke node -e "if(process.getuid()===0)process.exit(1);require('node:fs').accessSync('/data/setup-token.txt')"
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Set image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up ARM emulation
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=Family Library
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Write image reference
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          printf 'Image published: `%s:latest`\n\nKeep the GHCR package visibility **Private**.\n' "$IMAGE_NAME" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,6 @@
+*
+!server.mjs
+!ebook-files.mjs
+!public/
+!public/**
+!Dockerfile

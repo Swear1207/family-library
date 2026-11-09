@@ -1,0 +1,41 @@
+services:
+  library:
+    image: ${LIBRARY_IMAGE:?请在 .env 中填写已发布的 GHCR 镜像地址}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${HOST_PORT:-8787}:8787"
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:?请在 .env 中填写图书馆访问地址}
+      BOOKS_DIR: /books
+      SCAN_INTERVAL_SECONDS: 600
+      TZ: Asia/Shanghai
+    volumes:
+      - library-data:/data
+      - type: bind
+        source: ${BOOKS_PATH:?请在 .env 中填写 NAS 原始书籍目录}
+        target: /books
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  library-data:

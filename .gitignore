@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/
+.test-data/
+backups/
+*.sqlite
+*.sqlite-*
+*.db
+setup-token.txt
+node_modules/
+*.bak
